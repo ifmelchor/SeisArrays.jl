@@ -4,6 +4,7 @@
 # GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
 
 # Main ZLCC codes
+using Contour
 
 function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, sloint::T, fqband::Vector{T}, fsem::J, lwin::J, nwin::J, nadv::T, toff::J, slow0::Vector{T}=[0., 0.], ccerr::T=0.95, slow2::Bool=True, maac_thr::T=0.5, slomax2::T=0.3, sloint2::T=0.02) where {T<:Real, J<:Integer}
     
@@ -27,8 +28,8 @@ function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, s
     
     # create slowness main grid
     slow_grid  = _xygrid(slow0, sloint, slomax)
-    sx = xy_grid[1, :, 2]
-    sy = xy_grid[:, 1, 1]
+    sx = slow_grid[1, :, 2]
+    sy = slow_grid[:, 1, 1]
 
     # create deltatimes grid
     dtime     = _dtimefunc(xStaUTM, yStaUTM, fsem) # define delta time function
@@ -36,6 +37,9 @@ function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, s
 
     # filter data
     _filter!(data, fsem, fqband)
+
+    # define la funcion:
+    multi_r2p(Y, X) = r2p([-1.0 * Y, -1.0 * X])
     
     # iterate over time
     @inbounds for nk in 1:nwin
@@ -55,8 +59,8 @@ function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, s
         dict["slowmap"][nk,:,:] = ccmap
 
         # compute contour
-        level = maac * ccerr
-        contours = contours(sx, sy, ccmap, level)
+        level = [maac * ccerr]
+        c = contours(sx, sy, ccmap, level)
         cl = lines(levels(c)[1])
         nro_contornos = length(cl)
 
@@ -67,9 +71,9 @@ function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, s
         else
             # calcula la incertidumbre
             Xs, Ys = coordinates(cl[1])
-            ang_rad = atan.(-1 .* Ys, -1 .* Xs)
-            ang = rad2deg.(ang_rad)
-            ang = @. ifelse(ang < 0, ang + 360.0, ang)
+            ans = map(multi_r2p, Xs, Ys)
+            slo = [r[1] for r in ans]
+            ang = [r[2] for r in ans]
             ang_max = maximum(ang)
             ang_min = minimum(ang)
 
@@ -85,9 +89,9 @@ function zlcc(data::Array{T}, xStaUTM::Array{T}, yStaUTM::Array{T}, slomax::T, s
             end
             bazbnd = [baz_min, baz_max]
 
-            s_app = hypot.(Xs, Ys)
-            s_max = maximum(s_app)
-            s_min = minimum(s_app)
+            # slo = hypot.(Xs, Ys)
+            s_max = maximum(slo)
+            s_min = minimum(slo)
             slobnd = [s_min, s_max]
 
             if slow2 && maac > maac_thr

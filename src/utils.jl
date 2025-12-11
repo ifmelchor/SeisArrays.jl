@@ -16,22 +16,13 @@ function _empty_dict(base::Base)
     dict = Dict()
     
     # for attr in ("slow", "baz", "maac", "rms", "error")
-    for attr in ("maac", "rms")
+    for attr in ("maac", "rms", "slow", "baz")
         dict[attr] = Array{Float64}(undef, base.nwin)
     end
     
-    # dict["slowbnd"] = Array{Float64}(undef, base.nwin, 2)
-    # dict["bazbnd"] = Array{Float64}(undef, base.nwin, 2)
-    # if base.slow2
-    #     dict["slow2"] = Array{Float64}(undef, base.nwin)
-    #     dict["baz2"] = Array{Float64}(undef, base.nwin)
-    # end
-
+    dict["slowbnd"] = Array{Float64}(undef, base.nwin, 2)
+    dict["bazbnd"] = Array{Float64}(undef, base.nwin, 2)
     dict["slowmap"] = Array{Float64}(undef, base.nwin, base.nite, base.nite)
-    
-    if base.slow2
-        dict["slowmap2"] = Array{Float64}(undef, base.nwin, base.nite2, base.nite2)
-    end
 
     return dict
 end
