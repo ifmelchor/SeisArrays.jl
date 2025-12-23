@@ -5,80 +5,26 @@
 
 # GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
 
-# using PointwiseKDEs
-
 """
    _empty_dict(*args)
 
 Genera un dict vacio para llenar durante el procesado.
 """
-function _empty_dict(base::Base)
+function _empty_dict(base::BaseZLCC, save_maps::Bool)
     dict = Dict()
     
-    # for attr in ("slow", "baz", "maac", "rms", "error")
-    for attr in ("maac", "rms", "slow", "baz")
+    for attr in ("maac", "rms", "slow", "baz", "slow_ratio")
         dict[attr] = Array{Float64}(undef, base.nwin)
     end
     
+    if save_maps
+      dict["slowmap"] = Array{Float64}(undef, base.nwin, base.nite, base.nite)
+    end
+
     dict["slowbnd"] = Array{Float64}(undef, base.nwin, 2)
     dict["bazbnd"] = Array{Float64}(undef, base.nwin, 2)
-    dict["slowmap"] = Array{Float64}(undef, base.nwin, base.nite, base.nite)
 
     return dict
-end
-
-    #
-    # This function cretes the slownes grid
-    #
-function _xygrid(slow0::Vector{T}, sloint::T, slomax::T) where T<:Real
-
-    # define the size of the grid
-    nite    = 1 + 2*round(Int64, slomax/sloint)
-    
-    # init the grid in memeory
-    xy_grid = Array{T}(undef, nite, nite, 2)
-    
-    # fill the grid
-    for ii in 1:nite, jj in 1:nite
-        px = slow0[1] - slomax + sloint*(ii-1)
-        # pxi = pinc * px/pinc
-        py = slow0[2] - slomax + sloint*(ii-1)
-        # pyj = pinc * py/pinc
-        xy_grid[ii,jj,:] = [px,py]
-    end
-    
-    xy_grid[:,:,2] = adjoint(xy_grid[:,:,2])
-    
-    return xy_grid
-end
-
-    #
-    # This function cretes the deltatime grid
-    #
-function _dtimemap(dtime_func::Function, pxy_map::Array{T}, nsta::J) where {T<:Real, J<:Integer}
-    
-    nite = size(pxy_map, 1)
-
-    time_map = Array{T}(undef, nite, nite, nsta)
-    
-    for ii in 1:nite, jj in 1:nite 
-        time_map[ii,jj,:] = dtime_func(pxy_map[ii,jj,:])
-    end
-
-    return time_map
-end
-
-
-"""
-   _dtimefunc(*args)
-
-Genera la función que devuelve los delta times para un vector de lentidud aparente
-"""
-function _dtimefunc(stax::Array{T}, stay::Array{T}, fsem::J) where {T<:Real, J<:Integer}
-    xref = mean(stax)
-    yref = mean(stay)
-    dtime(pxy) = [pxy[1]*(stx-xref) + pxy[2]*(sty-yref) for (stx, sty) in zip(stax,stay)] .* fsem
-    return dtime
 end
 
 
@@ -94,21 +40,32 @@ function _cciter(nsta::J) where J<:Integer
   return cciter
 end
 
-"""
-  get_dtimes(x, y)
-    
-    Devuelve delta times correspondientes a un slowness y un azimuth
-    
-"""
-function get_dtimes(slow::T, bazm::T, slow0::Vector{T}, slomax::T, sloint::T, fsem::J, xStaUTM::Array{T}, yStaUTM::Array{T}) where {T<:Real, J<:Integer}
 
-  nsta  = length(xStaUTM)
-  pxy, pij   = p2r(slow, bazm, slow0, slomax, sloint)
-  dtime      = _dtimefunc(xStaUTM, yStaUTM, fsem)
-  slow_grid  = _xygrid(slow0, sloint, slomax)
-  time_grid  = _dtimemap(dtime, slow_grid, nsta)
+function get_delays(slow::T, bazm::T, slow0::Vector{T}, slomax::T, sloint::T, xStaUTM::Array{T}, yStaUTM::Array{T}) where T<:Real
 
-  return pxy, time_grid[pij[1], pij[2], :]
+    rad = deg2rad(bazm)
+    px = -slow * sin(rad)
+    py = -slow * cos(rad)
+
+    r  = -slomax:sloint:slomax
+    sx = collect(r .+ slow0[1])
+    sy = collect(r .+ slow0[2])
+    ii = argmin(abs.(sx .- px_theo))
+    jj = argmin(abs.(sy .- py_theo))
+
+    px = sx[ii]
+    py = sy[jj]
+
+    nsta = length(xStaUTM)
+    xref = mean(xStaUTM)
+    yref = mean(yStaUTM)
+    dx = (xStaUTM .- xref)
+    dy = (yStaUTM .- yref)
+
+    # Calcular Delta Times en segundos
+    dt = [(px * dx[i] + py * dy[i]) for i in 1:nsta]
+
+    return dt, [px, py]
 end
 
 
@@ -154,59 +111,38 @@ end
     
 """
 
-function r2p(pxy::Vector{T}) where T<:Real
-  x = pxy[1]
-  y = pxy[2]
-
-  slowness = hypot(x, y)
-  
-  if y < 0
-    azimuth = 180+atand(x/y)
-  end
-
-  if y > 0
-    azimuth = atand(x/y)
-    
-    if x < 0
-      azimuth += 360
-    end
-  end
-  
-  if y == 0
-    if x > 0
-      azimuth = 90.
-    end
-    
-    if x < 0
-      azimuth = 270.
+@inline function r2p(x::T, y::T) where T<:Real
+    if x == 0 && y == 0
+        return (0.0, 666.0)
     end
 
-    if x == 0
-      azimuth = 666.
+    slowness = hypot(x, y)
+    azimuth = mod(atand(x, y), 360)
+
+    if azimuth == 0
+        azimuth = 360.0
     end
-  end
-  
-  if azimuth == 0
-      azimuth = 360
-  end
-  
-  return (slowness, azimuth)
+
+    return (slowness, azimuth)
 end
 
 
-function _ijbound(arr::AbstractArray{T}, cclim::T) where T<:Real
-  
-  pos = findmax(arr)[2]
+"""
+  count_size(x, y)
+    
+    Get contour size from Lazada Equation
+    
+"""
 
-  if pos == 1 || pos == size(arr, 1)
-    return false, nothing
-  end
-  
-  i = findmin(abs.( arr[1:pos-1] .- cclim ))[2]
-  j = findmin(abs.( arr[pos+1:end] .- cclim ))[2]
-
-  return true, (i,pos+j)
+function contour_size(x, y)
+    area = 0.0
+    n = length(x)
+    for i in 1:n-1
+        area += x[i] * y[i+1] - x[i+1] * y[i]
+    end
+    return abs(area + x[n]*y[1] - x[1]*y[n]) / 2.0
 end
+
 
 """
   bm2(*args)
@@ -300,56 +236,53 @@ end
 
 
 """
-  fb2(*args)
-    
     Filter signal
 """
-function _fb2(x::Array{T}, fc::T, fs::J, lowpass::Bool; amort=0.47) where {T<:Real, J<:Real}
+function _fb2_inplace!(input, output, coef)
+    ndata = length(input)
+    output[1], output[2] = input[1], input[2]
+    @inbounds for j in 3:ndata
+        output[j] = coef[1]*input[j] + coef[2]*input[j-1] + coef[3]*input[j-2] + coef[4]*output[j-1] + coef[5]*output[j-2]
+    end
+end
 
-  a = tan(pi*fc/fs)
-  b = 2*a*a - 2
-  c = 1 - 2*amort*a + a*a
-  d = 1 + 2*amort*a + a*a
+function _get_fb2_coefs(fc, fs, lowpass, T)
+    a = tan(pi * fc / fs)
+    amort = 0.47
+    d = 1 + 2 * amort * a + a * a
+    
+    a0 = lowpass ? (a * a / d) : (1 / d)
+    a1 = lowpass ? (2 * a0) : (-2 * a0)
+    a2 = a0
+    b1 = -(2 * a * a - 2) / d
+    b2 = -(1 - 2 * amort * a + a * a) / d
 
-  if lowpass
-    a0 = a*a/d
-    a1 = 2*a0
-  else
-    a0 = 1/d
-    a1 = -2*a0
-  end
-  
-  a2 = a0
-  b1 = -b/d
-  b2 = -c/d   
-  
-  ndata = size(x, 1)
-  y = Array{T}(undef, ndata)
-  y[1] = x[1]
-  y[2] = x[2]
-
-  for j in 3:ndata
-    y[j] = a0*x[j] + a1*x[j-1] + a2*x[j-2] + b1*y[j-1] + b2*y[j-2]
-  end
-
-  return y
+    return (T(a0), T(a1), T(a2), T(b1), T(b2))
 end
 
 
 function _filter!(data::Array{T}, fs::J, fq_band::Vector{T}) where {T<:Real, J<:Real}
   
   fl, fh = fq_band
-  nsta = size(data,1)
-  
-  for i in 1:nsta
-    temp = _fb2(data[i,:], fh, fs, true)
-    data[i,:] = _fb2(temp, fl, fs, false)
-    temp = reverse(data[i,:])
-    data[i,:] = _fb2(temp, fh, fs, true)
-    temp = _fb2(data[i,:], fl, fs, false)
-    data[i,:] = reverse(temp)
-  end
+  ntime, nsta = size(data)
 
+  coef_h = _get_fb2_coefs(fh, fs, true, T)
+  coef_l = _get_fb2_coefs(fl, fs, false, T)
+
+  temp_buf = zeros(T, ntime)
+  
+  @views for i in 1:nsta
+    # Forward
+    _fb2_inplace!(data[:, i], temp_buf, coef_h)
+    _fb2_inplace!(temp_buf, data[:, i], coef_l)
+    # reverse
+    reverse!(data[:, i])
+    # backward
+    _fb2_inplace!(data[:, i], temp_buf, coef_h)
+    _fb2_inplace!(temp_buf, data[:, i], coef_l)
+    # reverse
+    reverse!(data[:, i])
+  end
 end
 
 
@@ -360,77 +293,3 @@ function _filter(data::Array{T}, fs::J, fq_band::Vector{T}) where {T<:Real, J<:R
 
     return U
 end
-
-
-"""
-  spb(args)
-    
-    Compute the mpaac
-    
-"""
-# function pmmac(cmap::Array{T,3}) where T<:Real
-  
-#   pdfx = LinRange(0, 1, 100)
-#   data = reshape(cmap, 1, :)
-#   kde  = PointwiseKDE(data)
-#   pdfy = rand(kde, 100)
-#   mpaac = pdfx[findmax(pdfy)[2][2]]
-  
-#   return mpaac
-# end
-
-# function mpm(slowmap::Array{T,3})  where T<:Real
-  
-#   nite = size(slowmap, 2)
-#   spbmap = Array{T}(undef, nite, nite)
-
-#   for ii in 1:nite
-#     for jj in 1:nite
-#       data = reshape(slowmap[:,ii,jj], (1, :))
-#       data = convert(Array{Float64}, data)
-#       data_min = findmin(data)[1]
-#       data_max = findmax(data)[1]
-#       x_space = LinRange(data_min, data_max, 100)
-#       kde = PointwiseKDE(data)
-#       y_space = rand(kde, 100)
-#       cc_ij = x_space[findmax(y_space)[2][2]]
-#       spbmap[ii,jj] = cc_ij
-#     end
-#   end
-    
-#   return spbmap
-# end
-
-
-# """
-#   spb(args)
-    
-#     Compute the slowmness and back_azimuth time map
-    
-# """
-
-# function slobaztmap(slowmap::Array{T,3}, pinc::J, pmax::J, cc_th::J)  where {T<:Real, J<:Real}
-
-#   nwin = size(slowmap, 1)
-#   nite = size(slowmap, 2)
-
-#   pxymap = _pxymap([0.,0.], nite, pinc, pmax)
-#   sbtm = Array{Vector{Tuple{T,T}}}(undef, nwin)
-
-#   for t in 1:nwin
-#     data = slowmap[t,:,:]
-
-#     sbtm_t = Vector{Tuple{T,T}}()
-#     for ii in 1:nite
-#       for jj in 1:nite
-#         if data[ii,jj] > cc_th
-#           push!(sbtm_t, r2p(-1 .* pxymap[ii,jj,:]))
-#         end
-#       end
-#     end
-
-#     sbtm[t] = sbtm_t
-#   end
-
-#   return sbtm
-# end

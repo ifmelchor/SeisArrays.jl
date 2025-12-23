@@ -1,26 +1,16 @@
 #!/usr/local/bin julia
 # coding=utf-8
 
-# GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
-
-# AbstractArrayResponse and ArrayResponse copied from github.com/anowacki/Beamforming.jl
-
-mutable struct Bounds{T<:Real}
-  azimin :: T
-  azimax :: T
-  slomin :: T
-  slomax :: T
-end
-
-
-struct Base{J<:Integer}
+struct BaseZLCC{T<:Real, J<:Integer}
   nite    :: J              #  --> slowness grid nite x nite
-  nite2   :: J              #  --> slowness grid nite x nite
   nwin    :: J              #  --> number of time windows
   nsta    :: J              #  --> number of stations
   lwin    :: J              #  --> time window length
   citer   :: Vector{Tuple{J,J}}
-  slow2   :: Bool
+  sx      :: Vector{T}
+  sy      :: Vector{T}
+  dx      :: Vector{T}
+  dy      :: Vector{T}
 end
 
 

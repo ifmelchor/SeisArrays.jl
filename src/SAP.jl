@@ -1,8 +1,6 @@
 #!/usr/local/bin julia
 # coding=utf-8
 
-# GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
-
 __precompile__()
 
 module SAP
@@ -10,8 +8,15 @@ module SAP
     using LinearAlgebra
     using Statistics
     using Contour
+
+    abstract type AbstractBase end
+
+    function _ccmap! end
+    function rolling_bandpower end
     
-    export zlcc, get_dtimes, array_transfunc, p2r
+    export rolling_bandpower
+    export zlcc, zlcc_stack, array_transfunc
+    export AbstractBase, BaseCuda
 
     include("types.jl")
 
