@@ -67,7 +67,7 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
 
     elseif ncontour == 1
         Xs, Ys    = coordinates(cl[1])
-        area_blob = _contour_size(Xs, Ys)
+        area_blob = contour_size(Xs, Ys)
         is_good = true
         idx = 1
         ratio = -1.
@@ -78,7 +78,7 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
         sizes = zeros(ncontour)
         for nc in 1:ncontour
             Xs, Ys = coordinates(cl[nc])
-            sizes[nc] = _contour_size(Xs, Ys)
+            sizes[nc] = contour_size(Xs, Ys)
         end
 
         sort_idx = sortperm(sizes, rev=true)

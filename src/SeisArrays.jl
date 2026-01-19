@@ -11,7 +11,9 @@ module SeisArrays
     export AbstractSeisArray, SeisArray2D
     export rolling_bandpower
     function rolling_bandpower end
-
+    export zlcc
+    export tcwals
+    
     include("types.jl")
     include("utils.jl")
     include("signals.jl")

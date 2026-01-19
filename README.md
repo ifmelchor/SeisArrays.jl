@@ -11,7 +11,7 @@
 - **Specialized Types:** Robust `SeisArray2D` structure to handle geometry (UTM) and waveform data together.
 - **In-place Processing:** Memory-efficient signal processing that minimizes allocations.
 - **Beamforming Algorithms:** - **ZLCC** (Zero-Lag Cross Correlation).
-  - **TCWALS** (Time-Closure Weighted Adaptive Likelihood Slowness).
+  <!-- - **TCWALS** (Time-Closure Weighted Adaptive Likelihood Slowness). -->
 - **Flexible Architecture:** Built on `AbstractSeisArray` to support future 3D geometries (boreholes/topography) seamlessy.
 
 ## 📦 Installation
