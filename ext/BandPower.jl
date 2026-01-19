@@ -1,9 +1,9 @@
 
 module BandPower
 
+    using SAP
     using Multitaper
     using Base.Threads
-    using SAP
 
     function __init__()
         if Threads.nthreads() == 1
