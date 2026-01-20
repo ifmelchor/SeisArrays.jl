@@ -103,6 +103,9 @@ struct ValidTrios{T<:AbstractFloat}
     dt1::Vector{T}
     dt2::Vector{T}
     dt3::Vector{T}
+    w_base::Vector{T}
+    err_sq::Vector{T}
+    id::Vector{Int}
 end
 
 

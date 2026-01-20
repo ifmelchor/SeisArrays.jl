@@ -83,3 +83,55 @@ function smooth_spectrum!(out::AbstractVector, inp::AbstractVector, B::Int)
         out[i] = acc * inv_B 
     end
 end
+
+
+
+function cc_overlap(s_ref::AbstractVector, s_mov::AbstractVector, lag::Int, N::Int, min_overlap::Int=50)
+
+    # 1. Definir los índices de intersección (Overlap)
+    # Si lag > 0: s_mov se desplaza a la derecha (sus primeros datos salen, entran ceros imaginarios)
+    # Comparamos la cola de s_ref con la cabeza de s_mov
+    
+    if lag >= 0
+        # s_ref: desde (1 + lag) hasta N
+        # s_mov: desde 1 hasta (N - lag)
+        range_ref = (1+lag):N
+        range_mov = 1:(N-lag)
+    else # lag < 0
+        # s_mov se desplaza a la izquierda
+        # s_ref: desde 1 hasta (N + lag)  (recuerda que lag es negativo)
+        # s_mov: desde (1 - lag) hasta N
+        range_ref = 1:(N+lag)
+        range_mov = (1-lag):N
+    end
+    
+    # Pocos samples = Correlación falsa
+    len_overlap = length(range_ref)
+    if len_overlap < min_overlap
+        return 0.0
+    end
+
+    # recorta la seccion
+    v_ref = @view s_ref[range_ref]
+    v_mov = @view s_mov[range_mov]
+    
+    # Calcular Pearson sobre las vistas
+    num = 0.0
+    sq_ref = 0.0
+    sq_mov = 0.0
+    @inbounds @simd for i in 1:len_overlap
+        x = v_ref[i]
+        y = v_mov[i]
+        num    = muladd(x, y, num)
+        sq_ref = muladd(x, x, sq_ref)
+        sq_mov = muladd(y, y, sq_mov)
+    end
+    
+    den = sqrt(sq_ref * sq_mov)
+    
+    if den > 1e-12
+        return num / den
+    else
+        return 0.0
+    end
+end

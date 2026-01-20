@@ -84,6 +84,12 @@ end
 
 
 
+function cross_pair_dist(S::SeisArray2D, pairs)
+    cross_pair_dist(S.xcoord, S.ycoord, pairs)
+end
+
+
+
 function cross_pair_dist(x_coords, y_coords, pairs)
     num_pairs = length(pairs)
     dx_full = zeros(num_pairs)
@@ -137,6 +143,7 @@ function get_delays(slow::T, bazm::T, slow0::Vector{T}, slowmax::T, slowint::T, 
 end
 
 
+
 function slowess_linear(dx, dy, dt)
     
     # matriz de diseño
@@ -151,6 +158,51 @@ function slowess_linear(dx, dy, dt)
     rms = norm(G*s - dt) / sqrt(length(dt))
 
     return s, rms
+end
+
+
+
+function init_triads(nsta)
+    pairs = cciter(nsta)
+    trios = init_triads(nsta, pairs)
+    return pairs, trios
+end
+
+
+function init_triads(nsta, pairs)
+    triangles = Vector{TriangleDef}()
+    pair_map = zeros(Int, nsta, nsta)
+
+    @inbounds for (idx, p) in enumerate(pairs)
+        u, v = p
+        pair_map[u, v] = idx
+        pair_map[v, u] = idx
+    end
+
+    sizehint!(triangles, div(nsta^3, 6))
+
+    # Busca triangulos i < j < k
+    @inbounds for i in 1:nsta
+        for j in (i+1):nsta
+            for k in (j+1):nsta
+
+                idx_ij = pair_map[i, j]
+                idx_jk = pair_map[j, k]
+                idx_ki = pair_map[k, i]
+
+                if idx_ij > 0 && idx_jk > 0 && idx_ki > 0
+                    s1 = (pairs[idx_ij] == (i,j)) ? 1.0 : -1.0
+                    s2 = (pairs[idx_jk] == (j,k)) ? 1.0 : -1.0
+                    s3 = (pairs[idx_ki] == (k,i)) ? 1.0 : -1.0
+
+                    trio = (i, j, k)
+                    push!(triangles, TriangleDef(idx_ij, idx_jk, idx_ki, s1, s2, s3, trio))
+                end
+            end
+        end
+    end
+
+    return triangles
 end
 
 

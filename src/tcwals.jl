@@ -4,12 +4,17 @@
 # GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
  # TC-WALS (Time-Closure Weighted Adaptive Likelihood Slowness)
 
-function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVector{T}, fsem::Int, lwin::Int, nadv::T, fqband::Vector{T}; slowmax::T=2.0, slowint::T=0.02, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, score_min::T=5.0, gamma_L::T=2.0, lambda_L::T=5.0, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing) where {T<:Real}
+function tcwals(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Real, args...; kwargs...)
+    
+    SA = SeisArray2D(x, y, data, fs)
+    
+    return tcwals(SA, args...; kwargs...)
+end
 
-    npts, nsta = size(data)
-    data = _filter(data, fsem, fqband)
-    station_mask = falses(nsta)
-    station_lags = zeros(Int, nsta)
+function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.0, slowint::T=0.02, ccerr::T=0.95, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, score_min::T=5.0, gamma_L::T=2.0, lambda_L::Union{T, Nothing}=nothing, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing) where {T<:Real}
+
+    npts, nsta = size(S.data)
+    filter!(S, fmin, fmax)
 
     # definición del mapa de lentitud
     s_grid  = -slowmax:slowint:slowmax
@@ -20,25 +25,22 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
     step = round(Int, lwin * nadv)
     nwin = div(npts - lwin, Int(step)) + 1
 
-    # geometría de pares
-    pairs   = cciter(nsta)
+    # geometría de pares y triadas
+    pairs, trios = init_triads(nsta)
     n_pairs = length(pairs)
-    dx, dy  = cross_pair_dist(xSta, ySta, pairs)
-
-    # geometria de trios
-    trios   = init_triangles(nsta, pairs)
     n_trios = length(trios)
+    dx, dy  = cross_pair_dist(S, pairs)
 
     @assert n_trios > min_trio
 
     # inicializa la funcion peso para la Likelihood
-    eps = 1/(fsem*upsample)
+    eps = 1/(S.fs*upsample)
     Teff2 = compute_Teff(trios, s_grid, dx, dy, eps)
 
     # inicialización de Buffers
     n_threads = Threads.nthreads()
     thread_buffers = [
-        init_buffers(n_pairs, n_trios, nite, lwin, fsem, fqband[1], fqband[2], B_PHAT, g_PHAT, upsample, df_taper_PHAT) 
+        init_buffers(n_pairs, n_trios, nite, lwin, S.fs, fmin, fmax, B_PHAT, g_PHAT, upsample, df_taper_PHAT) 
     for _ in 1:n_threads
     ]
 
@@ -46,10 +48,11 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
     dout = Dict{String, Any}()
     dout["time_s"]  = fill(NaN, nwin)
     dout["n_trios"] = fill(NaN, nwin)
-    dout["cc_avg"] = fill(NaN, nwin)
+    dout["cc_avg"]  = fill(NaN, nwin)
     dout["likemap"] = fill(Float32(NaN), (nwin, nite, nite))
+    dout["lambda"]  = fill(NaN, nwin)
     dout["lmax"] = fill(NaN, nwin)
-    # dout["trios"]   = [Vector{Tuple{Tuple{Int,Int,Int}, Float64, Float64}}() for _ in 1:nwin]
+    dout["trios"] = [Tuple{Int, Int, Int}[] for _ in 1:nwin]
     dout["sx"] = fill(NaN, nwin)
     dout["sy"] = fill(NaN, nwin)
     dout["ratio"]   = fill(NaN, nwin)
@@ -62,7 +65,7 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
     @views Threads.@threads for nk in 1:nwin
         # define la ventana
         n0 = round(Int, 1 + lwin * nadv * (nk - 1))
-        window_data = data[n0:n0+lwin-1, :]
+        window_data = S.data[n0:n0+lwin-1, :]
 
         # inicia el buffer
         tid = Threads.threadid()
@@ -86,7 +89,7 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
                     delay  = compute_delay!(buf.fsgcc_ws, signal_j, signal_i, psr_th)
                     
                     # calcula coeficiente correlacion en el tiempo
-                    lag = round(Int, delay * fsem)
+                    lag = round(Int, delay * S.fs)
                     cc_val = cc_overlap(signal_j, signal_i, lag, lwin)
                     # si la correlacion fue mala, cc_val => 0.0
 
@@ -127,36 +130,20 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
         n_valid_trios  = count(buf.trio_flags)
 
         if n_valid_trios >= min_trio
-
-            # calculamos el likelihood
-            likelihood!(buf, trios, dx, dy, s_grid, nite, slomax2, Teff2, gamma_L, lambda_L)
-            l_max = maximum(buf.like_map)
-            
-            if l_max > 0.1
-                dout["time_s"][nk]  = (n0 - 1) / float(fsem)
+            # calculamos el mapa de misfits
+            misfitmap!(buf, trios, dx, dy, s_grid, nite, slomax2, Teff2, gamma_L)
+            best_misfit = minimum(buf.like_map)
+            if best_misfit < 2.0 # s
+                dout["time_s"][nk]  = (n0 - 1) / float(S.fs)
                 dout["n_trios"][nk] = n_valid_trios
                 dout["cc_avg"][nk]  = cc_avg/n_valid_trios
-                dout["lmax"][nk]    = l_max
+                dout["lambda"][nk]  = best_misfit
                 dout["likemap"][nk, :, :] .= buf.like_map
-                # calculamos el contorno
-                is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(s_grid, s_grid, buf.like_map, l_max*0.95, ratio_max)
-                dout["ratio"][nk]    = ratio
-
-                if is_good
-                    # guardamos el resultado final
-                    dout["sx"][nk] = s_c[1]
-                    dout["sy"][nk] = s_c[2]
-                    dout["baz"][nk,1] = bazbnd[1]
-                    dout["baz"][nk,2] = bazbnd[2]
-                    dout["baz"][nk,3] = bazbnd[3]
-                    dout["slow"][nk,1] = slobnd[1]
-                    dout["slow"][nk,2] = slobnd[2]
-                    dout["slow"][nk,3] = slobnd[3]
-                    dout["baz_width"][nk] = bazbnd[4]
-                    dout["slow_width"][nk] = slobnd[4]
-
-                    # calculamos el beam power de las estaciones activas
-                    dout["rms"][nk] = beam_power(buf, window_data, trios, xSta, ySta, lwin, fsem, s_c[1], s_c[2], station_mask, station_lags)
+                # save trios
+                @inbounds for t in eachindex(trios)
+                    if buf.trio_flags[t]
+                        push!(dout["trios"][nk], trios[t].sta_triad)
+                    end
                 end
             end
         end
@@ -164,14 +151,72 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
 
     mask = findall(!isnan, dout["time_s"])
 
-   if isempty(mask)
-        ws = nothing
-        GC.gc()
+    if isempty(mask)
         return nothing
     end
 
+    # calcula el lambda para la likelihood
+    if isnothing(lambda_L) || lambda_L <= zero(T)
+        s_noise_floor = quantile(dout["lambda"][mask], 0.2)
+        lambda_global = 1.0 / max(s_noise_floor, 1e-4)
+        println("Auto-Lambda calculado: ", lambda_global)
+    else
+        lambda_global = lambda_L
+    end
+
+    # define los buffers para las estaciones
+    station_mask = [falses(nsta) for _ in 1:n_threads]
+    station_lags = [zeros(Int, nsta) for _ in 1:n_threads]
+
+    @views Threads.@threads for nk in mask
+        likemap = dout["likemap"][nk, :, :]
+        @. likemap = exp(-lambda_global * likemap)
+
+        likemax = maximum(likemap)
+
+        if likemax > 0.1
+            is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(s_grid, s_grid, likemap, likemax*ccerr, ratio_max)
+            dout["lmax"][nk]  = likemax
+            dout["ratio"][nk] = ratio
+
+            if is_good
+                # guardamos el resultado final
+                dout["sx"][nk] = s_c[1]
+                dout["sy"][nk] = s_c[2]
+                dout["baz"][nk,1] = bazbnd[1]
+                dout["baz"][nk,2] = bazbnd[2]
+                dout["baz"][nk,3] = bazbnd[3]
+                dout["slow"][nk,1] = slobnd[1]
+                dout["slow"][nk,2] = slobnd[2]
+                dout["slow"][nk,3] = slobnd[3]
+                dout["baz_width"][nk] = bazbnd[4]
+                dout["slow_width"][nk] = slobnd[4]
+
+                # calculamos el beam power de las estaciones activas
+                n0 = round(Int, 1 + lwin * nadv * (nk - 1))
+                window_data = S.data[n0:n0+lwin-1, :]
+
+                # fill station mask
+                tid = Threads.threadid()
+                buf = thread_buffers[tid]
+                stamask = station_mask[tid]
+                lagmask = station_lags[tid]
+                fill!(stamask, false)
+                @inbounds for (i,j,k) in dout["trios"][nk]
+                    stamask[i] = true
+                    stamask[j] = true
+                    stamask[k] = true
+                end
+
+                dout["rms"][nk] = beam_power(window_data, S.xcoord, S.ycoord, lwin, S.fs, s_c[1], s_c[2], stamask, lagmask)
+            end
+        end
+    end
+
+    mask = findall(!isnan, dout["sx"])
+
     if stack
-        stack_dout = wals_stack(dout, mask, s_grid, baz_th, baz_lim, 0.95, ratio_max)
+        stack_dout = wals_stack(dout, mask, s_grid, baz_th, baz_lim, ccerr, ratio_max)
     end
 
     final_dout = Dict{String, Any}()
@@ -198,26 +243,37 @@ function wals(data::AbstractMatrix{T}, xSta::AbstractVector{T}, ySta::AbstractVe
 end
 
 
-function likelihood!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy, s_grid::AbstractVector{T}, nite::Int, slomax2::T, teff2::AbstractArray{T,3}, gamma::T=2.0, lambda::T=5.0) where {T<:AbstractFloat}
+function misfitmap!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy, s_grid::AbstractVector{T}, nite::Int, slomax2::T, teff2::AbstractArray{T,3}, gamma::T=2.0) where {T<:AbstractFloat}
 
     # inicializamos la funcion peso
     k = 1
     @inbounds for t in eachindex(triangles)
         if buf.trio_flags[t]
             trio = triangles[t]
+
+            # Copia de coordenadas
             buf.vt.x1[k] = dx[trio.p1_idx]
             buf.vt.y1[k] = dy[trio.p1_idx]
             buf.vt.x2[k] = dx[trio.p2_idx]
             buf.vt.y2[k] = dy[trio.p2_idx]
             buf.vt.x3[k] = dx[trio.p3_idx]
             buf.vt.y3[k] = dy[trio.p3_idx]
+
+            # Copia de delays observados
             buf.vt.dt1[k] = buf.dt[trio.p1_idx]
             buf.vt.dt2[k] = buf.dt[trio.p2_idx]
             buf.vt.dt3[k] = buf.dt[trio.p3_idx]
+
+            # Pre-cálculo de términos constantes del peso
+            buf.vt.w_base[k] = buf.trio_cc_avg[t]^gamma 
+            buf.vt.err_sq[k] = buf.trio_error[t]^2
+
+            # Guardar ID original
+            buf.vt.id[k] = t
             k += 1
         end
     end
-    nvtrios = k - 1
+    nvtrios = k-1
 
     @inbounds for j in 1:nite
         sy  = s_grid[j]
@@ -227,7 +283,7 @@ function likelihood!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy,
             sx = s_grid[i]
 
             if (sx*sx + sy2) > slomax2
-                buf.like_map[i, j] = 0.0
+                buf.like_map[i, j] = typemax(T)
                 continue
             end
 
@@ -246,13 +302,15 @@ function likelihood!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy,
                          abs(dt_t3 - buf.vt.dt3[k])
 
                 # peso
-                w_val = buf.trio_cc_avg[k]^gamma * exp(-buf.trio_error[k]^2 * teff2[k,i,j])
+                tidx = buf.vt.id[k]
+                w_val = buf.vt.w_base[k] * exp(-buf.vt.err_sq[k] * teff2[tidx,i,j])
 
                 W_sum += w_val
                 R_sum += w_val * e_trio
             end
 
-            buf.like_map[i, j] = exp(-lambda*R_sum/W_sum)
+            misfit_val = (W_sum > 1e-6) ? (R_sum / W_sum) : typemax(T)
+            buf.like_map[i, j] = misfit_val
         end
     end
 end
@@ -406,40 +464,8 @@ function compute_delay!(ws::FSGCC_ws, s1_in::AbstractVector{T}, s2_in::AbstractV
 end
 
 
-function init_triangles(nsta, pairs)
-    triangles = Vector{TriangleDef}()
-    
-    # Busca triangulos i < j < k
-    @inbounds for i in 1:nsta
-        for j in (i+1):nsta
-            for k in (j+1):nsta
-                # Encontrar los índices lineales de los pares (i,j), (j,k), (k,i)
-                idx_ij = findfirst(x -> Set(x) == Set((i,j)), pairs)
-                idx_jk = findfirst(x -> Set(x) == Set((j,k)), pairs)
-                idx_ki = findfirst(x -> Set(x) == Set((i,k)), pairs)
-                
-                if !isnothing(idx_ij) && !isnothing(idx_jk) && !isnothing(idx_ki)
-                    # Determinar signos para que el loop sea A->B->C->A
-                    # Loop: (i->j) + (j->k) + (k->i) = 0
-                    s1 = (pairs[idx_ij] == (i,j)) ? 1.0 : -1.0
-                    s2 = (pairs[idx_jk] == (j,k)) ? 1.0 : -1.0
-                    s3 = (pairs[idx_ki] == (k,i)) ? 1.0 : -1.0
-                    
-                    trio = (i, j, k)
+function init_fsgcc(n::Int, fs::Real, fmin::Real, fmax::Real, B::Int, n_gamma::Real, upsample::Int, df_taper::Real)
 
-                    push!(triangles, TriangleDef(idx_ij, idx_jk, idx_ki, s1, s2, s3, trio))
-                end
-            end
-        end
-    end
-
-    return triangles
-end
-
-
-function init_fsgcc(n::Int, fs::Int, fmin::Real, fmax::Real, B::Int, n_gamma::Real, upsample::Int, df_taper::Real)
-
-    fs = Float64(fs)
     n_fft = nextpow(2, 2*n - 1)
     n_up = n_fft * upsample
     n_freq = (n_fft ÷ 2) + 1
@@ -503,7 +529,7 @@ function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, 
     trio_flags  = falses(n_trios)
     trio_error  = zeros(n_trios)
     trio_cc_avg = zeros(n_trios)
-    trio_w   = zeros(n_trios)
+    trio_w = zeros(n_trios)
     like_map = zeros(nite, nite)
 
     # esto es para el simd
@@ -514,6 +540,9 @@ function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, 
         zeros(n_trios), # dt1
         zeros(n_trios), # dt2
         zeros(n_trios), # dt3
+        zeros(n_trios),
+        zeros(n_trios),
+        zeros(Int, n_trios)
     )
 
     buff = ThreadBuffers(ws, dt, cc, trio_flags, trio_error, trio_cc_avg, trio_w, vt, like_map)
@@ -521,72 +550,9 @@ function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, 
 end
 
 
-function cc_overlap(s_ref::AbstractVector, s_mov::AbstractVector, lag::Int, N::Int, min_overlap::Int=50)
-
-    # 1. Definir los índices de intersección (Overlap)
-    # Si lag > 0: s_mov se desplaza a la derecha (sus primeros datos salen, entran ceros imaginarios)
-    # Comparamos la cola de s_ref con la cabeza de s_mov
-    
-    if lag >= 0
-        # s_ref: desde (1 + lag) hasta N
-        # s_mov: desde 1 hasta (N - lag)
-        range_ref = (1+lag):N
-        range_mov = 1:(N-lag)
-    else # lag < 0
-        # s_mov se desplaza a la izquierda
-        # s_ref: desde 1 hasta (N + lag)  (recuerda que lag es negativo)
-        # s_mov: desde (1 - lag) hasta N
-        range_ref = 1:(N+lag)
-        range_mov = (1-lag):N
-    end
-    
-    # Pocos samples = Correlación falsa
-    len_overlap = length(range_ref)
-    if len_overlap < min_overlap
-        return 0.0
-    end
-
-    # recorta la seccion
-    v_ref = @view s_ref[range_ref]
-    v_mov = @view s_mov[range_mov]
-    
-    # Calcular Pearson sobre las vistas
-    num = 0.0
-    sq_ref = 0.0
-    sq_mov = 0.0
-    @inbounds @simd for i in 1:len_overlap
-        x = v_ref[i]
-        y = v_mov[i]
-        num    = muladd(x, y, num)
-        sq_ref = muladd(x, x, sq_ref)
-        sq_mov = muladd(y, y, sq_mov)
-    end
-    
-    den = sqrt(sq_ref * sq_mov)
-    
-    if den > 1e-12
-        return num / den
-    else
-        return 0.0
-    end
-end
-
-
-function beam_power(buf::ThreadBuffers, data::AbstractArray{T}, triangles::Vector{TriangleDef}, xSta::AbstractVector{T}, ySta::AbstractVector{T}, lwin::Int, fsem::Int, sx::Real, sy::Real, station_mask::BitVector, station_lags::AbstractVector{Int}) where {T<:AbstractFloat}
-
-    fill!(station_mask, false)
+function beam_power(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::AbstractVector{T}, lwin::Int, fsem::Real, sx::Real, sy::Real, station_mask::BitVector, station_lags::AbstractVector{Int}) where {T<:AbstractFloat}
 
     # xsta y ysta tienen que ser coordenadas en relacion al centro
-
-    @inbounds for t in eachindex(triangles)
-        if buf.trio_flags[t]
-            trio = triangles[t]
-            i, j, k = trio.sta_triad
-            station_mask[i] = true
-            station_mask[j] = true
-            station_mask[k] = true
-        end
-    end
 
     n_active = count(station_mask)
     sum_x = 0.0

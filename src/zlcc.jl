@@ -12,10 +12,10 @@ function zlcc(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Rea
 end
 
 
-function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fqband::AbstractVector{<:Real}, slowmax::Real, slowint::Real, toff::Real; slow0::AbstractVector{<:Real}=[0., 0.], ccerr::Real=0.95, maac_th::Real=0.5, slowmax2::Real=0.2, slowint2::Real=0.005, ratio_max::Real=0.05, slow2::Bool=false, use_gpu::Bool=false, stack::Bool=false, baz_th::Real=30.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing)
+function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slowmax::Real, slowint::Real, toff::Real; slow0::AbstractVector{<:Real}=[0., 0.], ccerr::Real=0.95, maac_th::Real=0.5, slowmax2::Real=0.2, slowint2::Real=0.005, ratio_max::Real=0.05, slow2::Bool=false, use_gpu::Bool=false, stack::Bool=false, baz_th::Real=30.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing)
     
     # filtramos los datos
-    filter!(S, fqband[1], fqband[2])
+    filter!(S, fmin, fmax)
 
     # definición de ventanas
     npts, nsta = size(S.data)
@@ -364,9 +364,9 @@ function zlcc_stack(dout::Dict, mask::Vector{<:Integer}, ws::ZLCC_WS_CPU, maac_t
     raw_baz_width = dout["baz_width"][mask]
     raw_smap  = dout["slowmap"][mask,:,:]
 
-    N_total = length(raw_maac)
+    N_total = length(dout["time_s"])
 
-    if N_total == 0
+    if length(raw_time) == 0
         return nothing
     end
     
