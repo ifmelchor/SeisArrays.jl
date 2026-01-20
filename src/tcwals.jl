@@ -618,15 +618,16 @@ end
 function wals_stack(dout::Dict, mask::Vector{<:Integer}, s_grid::AbstractVector{T}, baz_th::Real, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, ccerr::Real=0.95, ratio_max::Real=0.05) where {T<:AbstractFloat}
 
     raw_maac = dout["lmax"][mask]
+    raw_time = dout["time_s"][mask]
     raw_rms  = dout["rms"][mask]
     raw_baz  = dout["baz"][mask,2]
     raw_slow = dout["slow"][mask,2]
     raw_baz_width = dout["baz_width"][mask]
     raw_lmap  = dout["likemap"][mask,:,:]
 
-    N_total = length(raw_maac)
+    N_total = length(dout["time_s"])
 
-    if N_total == 0
+    if length(raw_time) == 0
         return nothing
     end
     
@@ -652,6 +653,7 @@ function wals_stack(dout::Dict, mask::Vector{<:Integer}, s_grid::AbstractVector{
     stack_out = Dict{String, Any}()
     stack_out["prct_nidx"] = prct_nidx
     stack_out["nidx"]      = nidx
+    stack_out["time_s"]    = raw_time[nidx]
 
     # statistics
     stack_out["stats"] = Dict{String, Any}()
