@@ -11,7 +11,7 @@ function tcwals(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::R
     return tcwals(SA, args...; kwargs...)
 end
 
-function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.0, slowint::T=0.02, ccerr::T=0.95, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, score_min::T=5.0, gamma_L::T=2.0, lambda_L::Union{T, Nothing}=nothing, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing) where {T<:Real}
+function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.0, slowint::T=0.02, ccerr::T=0.95, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, score_min::T=5.0, gamma_L::T=2.0, lambda_L::Union{T, Nothing}=nothing, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, return_misfit::Bool=false) where {T<:Real}
 
     npts, nsta = size(S.data)
     filter!(S, fmin, fmax)
@@ -47,20 +47,23 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
     # diccionario de salida
     dout = Dict{String, Any}()
     dout["time_s"]  = fill(NaN, nwin)
-    dout["n_trios"] = fill(NaN, nwin)
+    dout["n_trios"] = fill(0, nwin)
     dout["cc_avg"]  = fill(NaN, nwin)
     dout["likemap"] = fill(Float32(NaN), (nwin, nite, nite))
-    dout["lambda"]  = fill(NaN, nwin)
-    dout["lmax"] = fill(NaN, nwin)
+    dout["best_misfit"]  = fill(NaN, nwin)
     dout["trios"] = [Tuple{Int, Int, Int}[] for _ in 1:nwin]
-    dout["sx"] = fill(NaN, nwin)
-    dout["sy"] = fill(NaN, nwin)
-    dout["ratio"]   = fill(NaN, nwin)
-    dout["baz"]     = fill(NaN, (nwin,3))
-    dout["slow"]    = fill(NaN, (nwin,3))
-    dout["baz_width"]  = fill(NaN, nwin)
-    dout["slow_width"] = fill(NaN, nwin)
-    dout["rms"]   = fill(NaN, nwin)
+    
+    if !return_misfit
+        dout["lmax"] = fill(NaN, nwin)
+        dout["sx"] = fill(NaN, nwin)
+        dout["sy"] = fill(NaN, nwin)
+        dout["ratio"]   = fill(NaN, nwin)
+        dout["baz"]     = fill(NaN, (nwin,3))
+        dout["slow"]    = fill(NaN, (nwin,3))
+        dout["baz_width"]  = fill(NaN, nwin)
+        dout["slow_width"] = fill(NaN, nwin)
+        dout["rms"]   = fill(NaN, nwin)
+    end
 
     @views Threads.@threads for nk in 1:nwin
         # define la ventana
@@ -137,7 +140,7 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
                 dout["time_s"][nk]  = (n0 - 1) / float(S.fs)
                 dout["n_trios"][nk] = n_valid_trios
                 dout["cc_avg"][nk]  = cc_avg/n_valid_trios
-                dout["lambda"][nk]  = best_misfit
+                dout["best_misfit"][nk]  = best_misfit
                 dout["likemap"][nk, :, :] .= buf.like_map
                 # save trios
                 @inbounds for t in eachindex(trios)
@@ -155,68 +158,72 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
         return nothing
     end
 
-    # calcula el lambda para la likelihood
-    if isnothing(lambda_L) || lambda_L <= zero(T)
-        s_noise_floor = quantile(dout["lambda"][mask], 0.2)
-        lambda_global = 1.0 / max(s_noise_floor, 1e-4)
-        println("Auto-Lambda calculado: ", lambda_global)
-    else
-        lambda_global = lambda_L
-    end
+    if !return_misfit
+        # calcula el lambda para la likelihood
+        if isnothing(lambda_L) || lambda_L <= zero(T)
+            s_noise_floor = quantile(dout["best_misfit"][mask], 0.2)
+            lambda_global = 1.0 / max(s_noise_floor, 1e-4)
+            println("Auto-Lambda calculado: ", lambda_global)
+        else
+            lambda_global = lambda_L
+        end
 
-    # define los buffers para las estaciones
-    station_mask = [falses(nsta) for _ in 1:n_threads]
-    station_lags = [zeros(Int, nsta) for _ in 1:n_threads]
+        # define los buffers para las estaciones
+        station_mask = [falses(nsta) for _ in 1:n_threads]
+        station_lags = [zeros(Int, nsta) for _ in 1:n_threads]
 
-    @views Threads.@threads for nk in mask
-        likemap = dout["likemap"][nk, :, :]
-        @. likemap = exp(-lambda_global * likemap)
+        @views Threads.@threads for nk in mask
+            likemap = dout["likemap"][nk, :, :]
+            @. likemap = exp(-lambda_global * likemap)
 
-        likemax = maximum(likemap)
+            likemax = maximum(likemap)
 
-        if likemax > 0.1
-            is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(s_grid, s_grid, likemap, likemax*ccerr, ratio_max)
-            dout["lmax"][nk]  = likemax
-            dout["ratio"][nk] = ratio
+            if likemax > 0.1
+                is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(s_grid, s_grid, likemap, likemax*ccerr, ratio_max)
+                dout["lmax"][nk]  = likemax
+                dout["ratio"][nk] = ratio
 
-            if is_good
-                # guardamos el resultado final
-                dout["sx"][nk] = s_c[1]
-                dout["sy"][nk] = s_c[2]
-                dout["baz"][nk,1] = bazbnd[1]
-                dout["baz"][nk,2] = bazbnd[2]
-                dout["baz"][nk,3] = bazbnd[3]
-                dout["slow"][nk,1] = slobnd[1]
-                dout["slow"][nk,2] = slobnd[2]
-                dout["slow"][nk,3] = slobnd[3]
-                dout["baz_width"][nk] = bazbnd[4]
-                dout["slow_width"][nk] = slobnd[4]
+                if is_good
+                    # guardamos el resultado final
+                    dout["sx"][nk] = s_c[1]
+                    dout["sy"][nk] = s_c[2]
+                    dout["baz"][nk,1] = bazbnd[1]
+                    dout["baz"][nk,2] = bazbnd[2]
+                    dout["baz"][nk,3] = bazbnd[3]
+                    dout["slow"][nk,1] = slobnd[1]
+                    dout["slow"][nk,2] = slobnd[2]
+                    dout["slow"][nk,3] = slobnd[3]
+                    dout["baz_width"][nk] = bazbnd[4]
+                    dout["slow_width"][nk] = slobnd[4]
 
-                # calculamos el beam power de las estaciones activas
-                n0 = round(Int, 1 + lwin * nadv * (nk - 1))
-                window_data = S.data[n0:n0+lwin-1, :]
+                    # calculamos el beam power de las estaciones activas
+                    n0 = round(Int, 1 + lwin * nadv * (nk - 1))
+                    window_data = S.data[n0:n0+lwin-1, :]
 
-                # fill station mask
-                tid = Threads.threadid()
-                buf = thread_buffers[tid]
-                stamask = station_mask[tid]
-                lagmask = station_lags[tid]
-                fill!(stamask, false)
-                @inbounds for (i,j,k) in dout["trios"][nk]
-                    stamask[i] = true
-                    stamask[j] = true
-                    stamask[k] = true
+                    # fill station mask
+                    tid = Threads.threadid()
+                    buf = thread_buffers[tid]
+                    stamask = station_mask[tid]
+                    lagmask = station_lags[tid]
+                    fill!(stamask, false)
+                    @inbounds for (i,j,k) in dout["trios"][nk]
+                        stamask[i] = true
+                        stamask[j] = true
+                        stamask[k] = true
+                    end
+
+                    dout["rms"][nk] = beam_power(window_data, S.xcoord, S.ycoord, lwin, S.fs, s_c[1], s_c[2], stamask, lagmask)
                 end
-
-                dout["rms"][nk] = beam_power(window_data, S.xcoord, S.ycoord, lwin, S.fs, s_c[1], s_c[2], stamask, lagmask)
             end
         end
-    end
 
-    mask = findall(!isnan, dout["sx"])
+        mask = findall(!isnan, dout["sx"])
 
-    if stack
-        stack_dout = wals_stack(dout, mask, s_grid, baz_th, baz_lim, ccerr, ratio_max)
+        if stack
+            stack_dout = wals_stack(dout, mask, s_grid, baz_th, baz_lim, ccerr, ratio_max)
+        end
+    else
+        dout["misfitmap"] = pop!(dout, "likemap")
     end
 
     final_dout = Dict{String, Any}()
@@ -237,6 +244,7 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
 
     if stack
         return final_dout, stack_dout
+    
     else
         return final_dout
     end
