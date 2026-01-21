@@ -8,9 +8,7 @@ module SeisArrays
     using FFTW
     using Contour
 
-    export AbstractSeisArray, SeisArray2D
-    export rolling_bandpower
-    function rolling_bandpower end
+    export SeisArray2D
     export zlcc
     export tcwals
     

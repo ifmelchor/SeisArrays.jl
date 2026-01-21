@@ -14,7 +14,6 @@ CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Multitaper = "a81958ac-9ec9-4086-814d-3ae87249a5e8"
 
 [extensions]
-BandPower = "Multitaper"
 GPUzlcc = "CUDA"
 
 [compat]
