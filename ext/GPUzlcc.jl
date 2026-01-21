@@ -2,8 +2,8 @@
 
 module GPUzlcc
 
-    using CUDA, SeisArrays
-    using StaticArrays
+    using SeisArrays
+    using CUDA, StaticArrays
 
     const MAX_GPU_STA = 64
 
@@ -76,7 +76,7 @@ module GPUzlcc
         return nothing
     end
 
-    function _compute_ccmap!(ws::ZLCC_ws, n0::Int)
+    function _compute_ccmap!(ws::ZLCC_WS_GPU, n0::Int)
 
         threads = (16, 16)
         blocks = (cld(length(ws.sx), 16), cld(length(ws.sy), 16))

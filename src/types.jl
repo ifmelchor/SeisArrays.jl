@@ -105,7 +105,6 @@ struct ValidTrios{T<:AbstractFloat}
     dt3::Vector{T}
     w_base::Vector{T}
     err_sq::Vector{T}
-    id::Vector{Int}
 end
 
 
@@ -119,6 +118,9 @@ struct ThreadBuffers{T<:AbstractFloat}
     trio_w      :: Vector{T}
     vt          :: ValidTrios
     like_map    :: Matrix{T}
+    finer_map   :: Matrix{T}
+    coarser_map :: Matrix{T}
+    sigma       :: T
 end
 
 

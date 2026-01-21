@@ -7,6 +7,7 @@ module SeisArrays
     using Statistics
     using FFTW
     using Contour
+    using Interpolations
 
     export SeisArray2D
     export zlcc

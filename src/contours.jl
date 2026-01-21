@@ -159,3 +159,55 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
 
     return is_good, ratio, [sx_mean, sy_mean], slobnd, bazbnd
 end
+
+
+function interpolate_grids!(buffer_grid::AbstractMatrix, coarse_grid::AbstractMatrix, fine_grid::AbstractMatrix, buffer_range::AbstractVector, coarse_range::AbstractVector, fine_range_x::AbstractVector, fine_range_y::AbstractVector)
+
+    N_buffer = size(buffer_grid, 1)
+
+    # Interpolador Coarse
+    itp_coarse = scale(interpolate(coarse_grid, BSpline(Linear())), coarse_range, coarse_range)
+    etp_coarse = extrapolate(itp_coarse, Flat())
+
+    @inbounds for j in 1:N_buffer
+        sy = buffer_range[j]        
+        @simd for i in 1:N_buffer
+            sx = buffer_range[i]
+            buffer_grid[i, j] = etp_coarse(sx, sy)
+        end
+    end
+
+    # Interpolador Fine
+    itp_fine = scale(interpolate(fine_grid, BSpline(Linear())), fine_range_x, fine_range_y)
+    etp_fine = extrapolate(itp_fine, Flat())
+
+    # calcular índices del parche fino y los extremos
+    buf_min  = first(buffer_range)
+    inv_step = 1.0 / step(buffer_range)
+    fine_min_x, fine_max_x = first(fine_range_x), last(fine_range_x)
+    fine_min_y, fine_max_y = first(fine_range_y), last(fine_range_y)
+
+    # Eje X
+    raw_start_x = (fine_min_x - buf_min) * inv_step + 1
+    raw_end_x   = (fine_max_x - buf_min) * inv_step + 1
+    
+    idx_start_x = clamp(ceil(Int, raw_start_x), 1, N_buffer)
+    idx_end_x   = clamp(floor(Int, raw_end_x),  1, N_buffer)
+    
+    # Eje Y
+    raw_start_y = (fine_min_y - buf_min) * inv_step + 1
+    raw_end_y   = (fine_max_y - buf_min) * inv_step + 1
+
+    idx_start_y = clamp(ceil(Int, raw_start_y), 1, N_buffer)
+    idx_end_y   = clamp(floor(Int, raw_end_y),  1, N_buffer)
+
+    @inbounds for j in idx_start_y:idx_end_y
+        sy = buffer_range[j]
+        @simd for i in idx_start_x:idx_end_x
+            sx = buffer_range[i]
+            buffer_grid[i, j] = etp_fine(sx, sy)
+        end
+    end
+
+    replace!(buffer_grid, NaN => Inf)
+end

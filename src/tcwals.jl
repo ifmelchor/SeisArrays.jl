@@ -11,15 +11,33 @@ function tcwals(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::R
     return tcwals(SA, args...; kwargs...)
 end
 
-function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.0, slowint::T=0.02, ccerr::T=0.95, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, score_min::T=5.0, gamma_L::T=2.0, lambda_L::Union{T, Nothing}=nothing, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, return_misfit::Bool=false) where {T<:Real}
+
+function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, ccerr::T=0.95, ratio_max::T=0.25, max_tce::T=0.5, min_cc::T=0.5, min_trio::Int=5, psr_th::T=5.0, upsample::Int=20, B_PHAT::Int=5, g_PHAT::T=2.0, df_taper_PHAT::T=0.2, misfit_max::T=1.0, gamma_L::T=2.0, lambda_L::Union{T, Nothing}=nothing, stack::Bool=false, baz_th::Real=20.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, return_misfit::Bool=false) where {T<:Real}
+
+    if return_misfit
+        lambda_L = nothing
+    end
+
+    if lambda_L === nothing || lambda_L == 0.0
+        return_misfit = true
+    end
 
     npts, nsta = size(S.data)
     filter!(S, fmin, fmax)
 
-    # definición del mapa de lentitud
-    s_grid  = -slowmax:slowint:slowmax
+    # limite de slowness
     slomax2 = slowmax*slowmax
-    nite    = size(s_grid, 1)
+
+    # definición de los mapas de lentitud 
+    # (coarser)
+    s_grid_c  = -slowmax:slowint_c:slowmax
+    nite_c    = size(s_grid_c, 1)
+    # (finer)
+    rfine  = -slowfw:slowint_f:slowfw
+    nite_f  = size(rfine, 1)
+    # (full)
+    s_grid = -slowmax:slowint_f:slowmax
+    nite   = size(s_grid, 1)
 
     # configuración de ventanas de analisis
     step = round(Int, lwin * nadv)
@@ -33,14 +51,13 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
 
     @assert n_trios > min_trio
 
-    # inicializa la funcion peso para la Likelihood
+    # caclula el sigma minimo teorico
     eps = 1/(S.fs*upsample)
-    Teff2 = compute_Teff(trios, s_grid, dx, dy, eps)
 
     # inicialización de Buffers
     n_threads = Threads.nthreads()
     thread_buffers = [
-        init_buffers(n_pairs, n_trios, nite, lwin, S.fs, fmin, fmax, B_PHAT, g_PHAT, upsample, df_taper_PHAT) 
+        init_buffers(n_pairs, n_trios, nite, nite_f, nite_c, lwin, S.fs, fmin, fmax, B_PHAT, g_PHAT, upsample, df_taper_PHAT) 
     for _ in 1:n_threads
     ]
 
@@ -49,14 +66,15 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
     dout["time_s"]  = fill(NaN, nwin)
     dout["n_trios"] = fill(0, nwin)
     dout["cc_avg"]  = fill(NaN, nwin)
-    dout["likemap"] = fill(Float32(NaN), (nwin, nite, nite))
     dout["best_misfit"]  = fill(NaN, nwin)
     dout["trios"] = [Tuple{Int, Int, Int}[] for _ in 1:nwin]
-    
+    dout["likemap"] = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
+    dout["sx"] = fill(NaN, nwin)
+    dout["sy"] = fill(NaN, nwin)
+    fill!(dout["likemap"], nothing)
+
     if !return_misfit
         dout["lmax"] = fill(NaN, nwin)
-        dout["sx"] = fill(NaN, nwin)
-        dout["sy"] = fill(NaN, nwin)
         dout["ratio"]   = fill(NaN, nwin)
         dout["baz"]     = fill(NaN, (nwin,3))
         dout["slow"]    = fill(NaN, (nwin,3))
@@ -79,6 +97,7 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
 
         # calcula las correlaciones de las triadas
         cc_avg = 0.0
+        k_vt   = 1
         @inbounds for t in eachindex(trios)
             trio = trios[t]
             for p in (trio.p1_idx, trio.p2_idx, trio.p3_idx)
@@ -106,11 +125,13 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
                 end
             end
 
+            # 2. Validación de Cierre y Llenado de vt
             if buf.trio_flags[t]
-                # Calcular cierre: dt1 + dt2 + dt3 ≈ 0
+
                 dt1 = buf.dt[trio.p1_idx]
                 dt2 = buf.dt[trio.p2_idx]
                 dt3 = buf.dt[trio.p3_idx]
+                # Calcular cierre: dt1 + dt2 + dt3 ≈ 0
                 closure = (dt1 * trio.s1) + (dt2 * trio.s2) + (dt3 * trio.s3)
 
                 if abs(closure) <= max_tce
@@ -121,27 +142,65 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
                     c2  = buf.cc[trio.p2_idx]
                     c3  = buf.cc[trio.p3_idx]
                     cc123 = (c1 + c2 + c3) / 3.0
+
                     buf.trio_cc_avg[t] = cc123
                     cc_avg += cc123
+                    
                     # println(t, "  CCavg: ", buf.trio_cc_avg[t], "  TCE: ", closure)
+
+                    # Ya sabemos que la tríada es útil, la guardamos para misfitmap!
+                    buf.vt.x1[k_vt] = dx[trio.p1_idx]
+                    buf.vt.y1[k_vt] = dy[trio.p1_idx]
+                    buf.vt.x2[k_vt] = dx[trio.p2_idx]
+                    buf.vt.y2[k_vt] = dy[trio.p2_idx]
+                    buf.vt.x3[k_vt] = dx[trio.p3_idx]
+                    buf.vt.y3[k_vt] = dy[trio.p3_idx]
+
+                    buf.vt.dt1[k_vt] = dt1
+                    buf.vt.dt2[k_vt] = dt2
+                    buf.vt.dt3[k_vt] = dt3
+
+                    # Pesos pre-calculados
+                    buf.vt.w_base[k_vt] = cc123^gamma_L
+                    buf.vt.err_sq[k_vt] = closure^2 
+                    k_vt += 1
+
                 else
                     buf.trio_flags[t] = false
                 end
             end
         end
 
-        n_valid_trios  = count(buf.trio_flags)
+        n_valid_trios  = k_vt-1
 
         if n_valid_trios >= min_trio
-            # calculamos el mapa de misfits
-            misfitmap!(buf, trios, dx, dy, s_grid, nite, slomax2, Teff2, gamma_L)
-            best_misfit = minimum(buf.like_map)
-            if best_misfit < 2.0 # s
+
+            # calculamos el mapa de misfits (coarser)
+            misfitmap!(buf.coarser_map, buf, n_valid_trios, s_grid_c, s_grid_c, slomax2)
+
+            best_misfit, idx = findmin(buf.coarser_map)
+
+            if best_misfit < misfit_max
+                # calculamos el mapa de misfits (finer)
+                sx_c = s_grid_c[idx[1]]
+                sy_c = s_grid_c[idx[2]]
+                rfx = rfine .+ sx_c 
+                rfy = rfine .+ sy_c
+                misfitmap!(buf.finer_map, buf, n_valid_trios, rfx, rfy, slomax2)
+
+                # interpolamos los grids
+                interpolate_grids!(buf.like_map, buf.coarser_map, buf.finer_map, s_grid, s_grid_c, rfx, rfy)
+
+                best_misfit, idx = findmin(buf.like_map)
+                best_sx = s_grid[idx[1]]
+                best_sy = s_grid[idx[2]]
                 dout["time_s"][nk]  = (n0 - 1) / float(S.fs)
                 dout["n_trios"][nk] = n_valid_trios
                 dout["cc_avg"][nk]  = cc_avg/n_valid_trios
                 dout["best_misfit"][nk]  = best_misfit
-                dout["likemap"][nk, :, :] .= buf.like_map
+                dout["likemap"][nk] = copy(buf.like_map)
+                dout["sx"][nk] = best_sx
+                dout["sy"][nk] = best_sy
                 # save trios
                 @inbounds for t in eachindex(trios)
                     if buf.trio_flags[t]
@@ -159,22 +218,14 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
     end
 
     if !return_misfit
-        # calcula el lambda para la likelihood
-        if isnothing(lambda_L) || lambda_L <= zero(T)
-            s_noise_floor = quantile(dout["best_misfit"][mask], 0.2)
-            lambda_global = 1.0 / max(s_noise_floor, 1e-4)
-            println("Auto-Lambda calculado: ", lambda_global)
-        else
-            lambda_global = lambda_L
-        end
 
         # define los buffers para las estaciones
         station_mask = [falses(nsta) for _ in 1:n_threads]
         station_lags = [zeros(Int, nsta) for _ in 1:n_threads]
 
         @views Threads.@threads for nk in mask
-            likemap = dout["likemap"][nk, :, :]
-            @. likemap = exp(-lambda_global * likemap)
+            likemap = dout["likemap"][nk]
+            @. likemap = exp(-lambda_L * likemap)
 
             likemax = maximum(likemap)
 
@@ -251,47 +302,26 @@ function tcwals(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T
 end
 
 
-function misfitmap!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy, s_grid::AbstractVector{T}, nite::Int, slomax2::T, teff2::AbstractArray{T,3}, gamma::T=2.0) where {T<:AbstractFloat}
+function misfitmap!(like_map::AbstractMatrix{T}, buf::ThreadBuffers, nvtrios::Int, s_grid_x::AbstractVector{T}, s_grid_y::AbstractVector{T}, slomax2::T) where {T<:AbstractFloat}
 
-    # inicializamos la funcion peso
-    k = 1
-    @inbounds for t in eachindex(triangles)
-        if buf.trio_flags[t]
-            trio = triangles[t]
+    nx = length(s_grid_x)
+    ny = length(s_grid_y)
 
-            # Copia de coordenadas
-            buf.vt.x1[k] = dx[trio.p1_idx]
-            buf.vt.y1[k] = dy[trio.p1_idx]
-            buf.vt.x2[k] = dx[trio.p2_idx]
-            buf.vt.y2[k] = dy[trio.p2_idx]
-            buf.vt.x3[k] = dx[trio.p3_idx]
-            buf.vt.y3[k] = dy[trio.p3_idx]
+    inv_2 = T(0.5)
+    min_weight = T(1e-6)
+    sigma_val = buf.sigma
 
-            # Copia de delays observados
-            buf.vt.dt1[k] = buf.dt[trio.p1_idx]
-            buf.vt.dt2[k] = buf.dt[trio.p2_idx]
-            buf.vt.dt3[k] = buf.dt[trio.p3_idx]
+    fill!(like_map, zero(T))
 
-            # Pre-cálculo de términos constantes del peso
-            buf.vt.w_base[k] = buf.trio_cc_avg[t]^gamma 
-            buf.vt.err_sq[k] = buf.trio_error[t]^2
-
-            # Guardar ID original
-            buf.vt.id[k] = t
-            k += 1
-        end
-    end
-    nvtrios = k-1
-
-    @inbounds for j in 1:nite
-        sy  = s_grid[j]
+    @inbounds for j in 1:ny
+        sy  = s_grid_y[j]
         sy2 = sy * sy
 
-        for i in 1:nite
-            sx = s_grid[i]
+        for i in 1:nx
+            sx = s_grid_x[i]
 
             if (sx*sx + sy2) > slomax2
-                buf.like_map[i, j] = typemax(T)
+                like_map[i, j] = typemax(T)
                 continue
             end
 
@@ -309,46 +339,22 @@ function misfitmap!(buf::ThreadBuffers, triangles::Vector{TriangleDef}, dx, dy, 
                          abs(dt_t2 - buf.vt.dt2[k]) + 
                          abs(dt_t3 - buf.vt.dt3[k])
 
-                # peso
-                tidx = buf.vt.id[k]
-                w_val = buf.vt.w_base[k] * exp(-buf.vt.err_sq[k] * teff2[tidx,i,j])
+                # tiempo maximo de la triada
+                tmax = inv_2 * (abs(dt_t1)+ abs(dt_t2) + abs(dt_t3))
+                tmax += sigma_val
+                tmax *= tmax
+
+                # funcion peso
+                w_val = buf.vt.w_base[k] * exp(-buf.vt.err_sq[k] / tmax)
 
                 W_sum += w_val
                 R_sum += w_val * e_trio
             end
 
-            misfit_val = (W_sum > 1e-6) ? (R_sum / W_sum) : typemax(T)
-            buf.like_map[i, j] = misfit_val
+            misfit_val = (W_sum > min_weight) ? (R_sum / W_sum) : typemax(T)
+            like_map[i, j] = misfit_val
         end
     end
-end
-
-
-function compute_Teff(triangles::Vector{TriangleDef}, s_grid::AbstractVector{T}, dx, dy, eps::T) where {T<:AbstractFloat}
-
-    nite  = length(s_grid)
-    ntrio = length(triangles)
-    Teff2 = zeros(nite, nite, ntrio)
-    @inbounds for t in eachindex(triangles)
-        trio = triangles[t]
-
-        for j in 1:nite
-            sy  = s_grid[j]
-            
-            @simd ivdep for i in 1:nite
-                sx = s_grid[i]
-
-                dt1 = abs(sx * dx[trio.p1_idx] + sy * dy[trio.p1_idx])
-                dt2 = abs(sx * dx[trio.p2_idx] + sy * dy[trio.p2_idx])
-                dt3 = abs(sx * dx[trio.p3_idx] + sy * dy[trio.p3_idx])
-                app = (dt1 + dt2 + dt3) / 2.0
-
-                Teff2[i,j,t] = 1.0 / (app+eps)^2
-            end
-        end
-    end
-
-    return permutedims(Teff2, (3, 1, 2))
 end
 
 
@@ -527,7 +533,8 @@ function init_fsgcc(n::Int, fs::Real, fmin::Real, fmax::Real, B::Int, n_gamma::R
 end
 
 
-function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
+function init_buffers(n_pairs, n_trios, nite, nite_f, nite_c, lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
+
     # Inicializa FS-PHAT
     ws = init_fsgcc(lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
     
@@ -539,6 +546,11 @@ function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, 
     trio_cc_avg = zeros(n_trios)
     trio_w = zeros(n_trios)
     like_map = zeros(nite, nite)
+    finer_map   = zeros(nite_f, nite_f)
+    coarser_map = zeros(nite_c, nite_c)
+
+    # sigma teorico
+    sigma = 1/(fs*upsample)
 
     # esto es para el simd
     vt = ValidTrios(
@@ -549,11 +561,11 @@ function init_buffers(n_pairs, n_trios, nite, lwin, fs, fmin, fmax, B, n_gamma, 
         zeros(n_trios), # dt2
         zeros(n_trios), # dt3
         zeros(n_trios),
-        zeros(n_trios),
-        zeros(Int, n_trios)
+        zeros(n_trios)
     )
 
-    buff = ThreadBuffers(ws, dt, cc, trio_flags, trio_error, trio_cc_avg, trio_w, vt, like_map)
+    buff = ThreadBuffers(ws, dt, cc, trio_flags, trio_error, trio_cc_avg, trio_w, vt, like_map, finer_map, coarser_map, sigma)
+    
     return buff
 end
 
