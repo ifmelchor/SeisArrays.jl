@@ -3,30 +3,42 @@
 
 
 function array_transfunc(S::SeisArray2D, slomax::Real, sloinc::Real, fmin::Real, fmax::Real, finc::Real)
-    return array_transfunc(S.xcoord, S.ycoord, slomax, sloinc, fmin, fmax, finc)
+
+    freqs   = fmin:finc:fmax
+    omegas  = T(2) * π .* freqs
+    s_vals  = -slomax:sloinc:slomax
+    n_s     = length(s_vals)
+    power   = zeros(T, n_s, n_s)
+
+    array_transfunc!(power, S.xcoord, S.ycoord, s_vals, omegas)
+
+    return s_vals, power
 end
 
 
-function array_transfunc(x::Array{T}, y::Array{T}, slomax::T, sloinc::T, fmin::T, fmax::T, finc::T) where T<:Real
+function array_transfunc!(power, x::AbstractVector{T}, y::AbstractVector{T}, s_grid::AbstractVector{T}, omegas::AbstractVector{T}) where T<:Real
 
-    freqs  = fmin:finc:fmax
-    omegas = T(2) * π .* freqs
-    s_vals = -slomax:sloinc:slomax
+    n_sta  = length(x)
+    n_s    = length(s_grid)
+    n_freq = length(omegas)
 
-    n_s = length(s_vals)
-    n_freq = length(freqs)
-    n_sta = length(x)
-
-    inv_nsta  = one(T) / nsta
+    inv_nsta  = one(T) / n_sta
     inv_nfreq = one(T) / n_freq
 
-    power = zeros(T, n_s, n_s)
+    slomax2 = maximum(s_grid)
+    slomax2 *= slomax2
 
-    Threads.@threads for j in 1:n_s
-        sy = s_vals[j]
+    @inbounds for j in 1:n_s
+        sy = s_grid[j]
+        sy2 = sy*sy
 
         for i in 1:n_s
-            sx = s_vals[i]
+            sx = s_grid[i]
+
+            if (sx*sx + sy2) > slomax2
+                power[i, j] = zero(T)
+                continue
+            end
 
             sum_power_freq = zero(T)
 
@@ -44,8 +56,6 @@ function array_transfunc(x::Array{T}, y::Array{T}, slomax::T, sloinc::T, fmin::T
             power[i, j] = sum_power_freq * inv_nfreq
         end
     end
-
-    return s_vals, power
 end
 
 
@@ -94,14 +104,18 @@ function cross_pair_dist(x_coords, y_coords, pairs)
     num_pairs = length(pairs)
     dx_full = zeros(num_pairs)
     dy_full = zeros(num_pairs)
-
+    dist_full = zeros(num_pairs)
     @inbounds for k in 1:num_pairs
         i, j = pairs[k]
-        dx_full[k] = x_coords[j] - x_coords[i]
-        dy_full[k] = y_coords[j] - y_coords[i]
+        dx = x_coords[j] - x_coords[i]
+        dy = y_coords[j] - y_coords[i]
+        dx_full[k] = dx
+        dy_full[k] = dy
+
+        dist_full[k] = sqrt(dx*dx + dy*dy)
     end
 
-    return dx_full, dy_full
+    return dx_full, dy_full, dist_full
 end
 
 

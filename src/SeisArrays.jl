@@ -11,7 +11,7 @@ module SeisArrays
 
     export SeisArray2D
     export zlcc
-    export tcwals
+    export trias
     
     include("types.jl")
     include("utils.jl")
@@ -21,7 +21,7 @@ module SeisArrays
     # Zero Lag Cross Correlation
     include("zlcc.jl")
 
-    # Time-Closure Weighted Adaptive Likelihood Slowness
-    include("tcwals.jl")
+    # TRIad-based Adaptive Slowness
+    include("trias.jl")
 
 end
