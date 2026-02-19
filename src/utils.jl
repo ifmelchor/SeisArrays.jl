@@ -175,18 +175,32 @@ function slowess_linear(dx, dy, dt)
 end
 
 
-
-function init_triads(nsta)
-    pairs = cciter(nsta)
-    trios = init_triads(nsta, pairs)
-    return pairs, trios
+function init_triads(S::SeisArray2D)
+    init_triads(S.xcoord, S.ycoord)
 end
 
 
-function init_triads(nsta, pairs)
+function init_triads(x_coords, y_coords)
+    nsta = length(x_coords)
+
+    # genera los pares
+    pairs = cciter(nsta)
+
+    # Calcula las métricas de los pares
+    dx_full, dy_full, dist_full = cross_pair_dist(x_coords, y_coords, pairs)
+
+    # Construimos las tríadas
+    trios = init_triads(nsta, pairs, dist_full)
+
+    return dx_full, dy_full, dist_full, pairs, trios
+end
+
+
+function init_triads(nsta::Int, pairs, dd)
     triangles = Vector{TriangleDef}()
     pair_map = zeros(Int, nsta, nsta)
 
+    # Mapeo de pares
     @inbounds for (idx, p) in enumerate(pairs)
         u, v = p
         pair_map[u, v] = idx
@@ -199,18 +213,24 @@ function init_triads(nsta, pairs)
     @inbounds for i in 1:nsta
         for j in (i+1):nsta
             for k in (j+1):nsta
-
+                trio = (i, j, k)
                 idx_ij = pair_map[i, j]
                 idx_jk = pair_map[j, k]
                 idx_ki = pair_map[k, i]
 
                 if idx_ij > 0 && idx_jk > 0 && idx_ki > 0
+                    # Lee distancia máxima de esta tríada
+                    d_ij = dd[idx_ij]
+                    d_jk = dd[idx_jk]
+                    d_ki = dd[idx_ki]
+                    dmax = max(d_ij, d_jk, d_ki)
+
+                    # Determinamos los signos
                     s1 = (pairs[idx_ij] == (i,j)) ? 1.0 : -1.0
                     s2 = (pairs[idx_jk] == (j,k)) ? 1.0 : -1.0
                     s3 = (pairs[idx_ki] == (k,i)) ? 1.0 : -1.0
 
-                    trio = (i, j, k)
-                    push!(triangles, TriangleDef(idx_ij, idx_jk, idx_ki, s1, s2, s3, trio))
+                    push!(triangles, TriangleDef(trio, idx_ij, idx_jk, idx_ki, s1, s2, s3, dmax))
                 end
             end
         end
@@ -218,8 +238,5 @@ function init_triads(nsta, pairs)
 
     return triangles
 end
-
-
-
 
 

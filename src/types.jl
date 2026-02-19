@@ -93,7 +93,8 @@ struct FSGCC_ws{P1, P2}
 end
 
 
-struct ValidTrios{T<:AbstractFloat}
+struct ValidTrios{T<:AbstractFloat, J<:Integer}
+    t::Vector{J}
     x1::Vector{T}
     y1::Vector{T}
     x2::Vector{T}
@@ -103,6 +104,7 @@ struct ValidTrios{T<:AbstractFloat}
     dt1::Vector{T}
     dt2::Vector{T}
     dt3::Vector{T}
+    cc::Vector{T}
     w_base::Vector{T}
     err_sq::Vector{T}
 end
@@ -112,7 +114,6 @@ struct ThreadBuffers{T<:AbstractFloat}
     fsgcc_ws    :: FSGCC_ws 
     dt          :: Vector{T}
     cc          :: Vector{T}
-    trio_flags  :: BitVector
     trio_error  :: Vector{T}
     trio_cc_avg :: Vector{T}
     trio_w      :: Vector{T}
@@ -125,6 +126,9 @@ end
 
 
 struct TriangleDef
+    # indicadores de la triada
+    sta_triad::Tuple{Int, Int, Int}
+
     # indicides de los pares
     p1_idx::Int
     p2_idx::Int
@@ -135,5 +139,6 @@ struct TriangleDef
     s2::Float64
     s3::Float64
 
-    sta_triad::Tuple{Int, Int, Int}
+    # distancia maxima del triangulo
+    dmax::Float64
 end
