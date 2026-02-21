@@ -184,8 +184,6 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
 
         # valida y ajusta mapa de residuos
         save = false
-        # sxf, syf = 0.0, 0.0
-        # f_sc = 1.0
         if n_valid_trios >= min_trio
             # calculamos el mapa de misfits (coarser)
             misfitmap!(buf.coarser_map, buf, n_valid_trios, s_grid_c, s_grid_c, slomax2)
