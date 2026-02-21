@@ -114,14 +114,23 @@ struct ThreadBuffers{T<:AbstractFloat}
     fsgcc_ws    :: FSGCC_ws 
     dt          :: Vector{T}
     cc          :: Vector{T}
+
     trio_error  :: Vector{T}
     trio_cc_avg :: Vector{T}
     trio_w      :: Vector{T}
     vt          :: ValidTrios
+    
     like_map    :: Matrix{T}
     finer_map   :: Matrix{T}
     coarser_map :: Matrix{T}
+
     sigma       :: T
+
+    station_mask::BitVector
+    station_lags::Vector{Int}
+    beam_window::Vector{Vector{T}}
+    beam::Vector{T}
+    beam_window_fft::Vector{Complex{T}}
 end
 
 
@@ -139,6 +148,8 @@ struct TriangleDef
     s2::Float64
     s3::Float64
 
-    # distancia maxima del triangulo
+    # distancia maxima/media del triangulo
     dmax::Float64
+    dmean::Float64
+    Q::Float64
 end

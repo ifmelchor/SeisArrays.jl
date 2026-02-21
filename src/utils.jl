@@ -111,7 +111,6 @@ function cross_pair_dist(x_coords, y_coords, pairs)
         dy = y_coords[j] - y_coords[i]
         dx_full[k] = dx
         dy_full[k] = dy
-
         dist_full[k] = sqrt(dx*dx + dy*dy)
     end
 
@@ -158,23 +157,6 @@ end
 
 
 
-function slowess_linear(dx, dy, dt)
-    
-    # matriz de diseño
-    G = hcat(dx, dy)
-
-    # resuelve el problema de minimos cuadrados
-    # s = (G^T G)^-1 G^T dt
-    # devuelve el s que minimiza (dt_obs - dt_teo)^2
-    s = G \ dt
-
-    # error residual
-    rms = norm(G*s - dt) / sqrt(length(dt))
-
-    return s, rms
-end
-
-
 function init_triads(S::SeisArray2D)
     init_triads(S.xcoord, S.ycoord)
 end
@@ -182,17 +164,22 @@ end
 
 function init_triads(x_coords, y_coords)
     nsta = length(x_coords)
+    
+    # calcula el centroide
+    # centroid_x = sum(x_coords) / nsta
+    # centroid_y = sum(y_coords) / nsta
+    # centroid = (centroid_x, centroid_y)
 
     # genera los pares
     pairs = cciter(nsta)
 
     # Calcula las métricas de los pares
-    dx_full, dy_full, dist_full = cross_pair_dist(x_coords, y_coords, pairs)
+    dx, dy, dd = cross_pair_dist(x_coords, y_coords, pairs)
 
     # Construimos las tríadas
-    trios = init_triads(nsta, pairs, dist_full)
+    trios = init_triads(nsta, pairs, dd)
 
-    return dx_full, dy_full, dist_full, pairs, trios
+    return pairs, dx, dy, dd, trios
 end
 
 
@@ -220,17 +207,23 @@ function init_triads(nsta::Int, pairs, dd)
 
                 if idx_ij > 0 && idx_jk > 0 && idx_ki > 0
                     # Lee distancia máxima de esta tríada
-                    d_ij = dd[idx_ij]
-                    d_jk = dd[idx_jk]
-                    d_ki = dd[idx_ki]
-                    dmax = max(d_ij, d_jk, d_ki)
+                    a = dd[idx_ij]
+                    b = dd[idx_jk]
+                    c = dd[idx_ki]
+                    dmax = max(a, b, c)
+                    dmean = (a+b+c)/3
+
+                    # calcula la regularidad geométrica
+                    s = (a+b+c)/2
+                    area = sqrt(max(0.0,s*(s-a)*(s-b)*(s - c)))
+                    Q = (4.0*sqrt(3.0)*area) / (a*a + b*b + c*c)
 
                     # Determinamos los signos
                     s1 = (pairs[idx_ij] == (i,j)) ? 1.0 : -1.0
                     s2 = (pairs[idx_jk] == (j,k)) ? 1.0 : -1.0
                     s3 = (pairs[idx_ki] == (k,i)) ? 1.0 : -1.0
 
-                    push!(triangles, TriangleDef(trio, idx_ij, idx_jk, idx_ki, s1, s2, s3, dmax))
+                    push!(triangles, TriangleDef(trio, idx_ij, idx_jk, idx_ki, s1, s2, s3, dmax, dmean, Q))
                 end
             end
         end

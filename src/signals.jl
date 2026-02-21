@@ -135,3 +135,24 @@ function cc_overlap(s_ref::AbstractVector, s_mov::AbstractVector, lag::Int, N::I
         return 0.0
     end
 end
+
+
+function haning_windows(lwin::Int, ::Type{T}=Float64) where {T<:AbstractFloat}
+
+    windows = Vector{Vector{T}}(undef, lwin)
+    
+    @inbounds for n in 1:lwin
+        win = zeros(T, n)
+        if n == 1
+            win[1] = one(T)
+        else
+            fac = T(2π) / (n - 1)  # ← Paréntesis para precisión
+            for i in 1:n
+                win[i] = T(0.5) * (one(T) - cos(fac * (i - 1)))
+            end
+        end
+        windows[n] = win
+    end
+
+    return windows
+end
