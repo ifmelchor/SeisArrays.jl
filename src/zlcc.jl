@@ -41,7 +41,8 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
     dout["baz_width"]  = fill(NaN, nwin)
     dout["slow_width"] = fill(NaN, nwin)
     nite = length(ws.sx)
-    dout["slowmap"] = fill(NaN, (nwin, nite, nite))
+    # dout["slowmap"] = fill(NaN, (nwin, nite, nite))
+    dout["slowmap"] = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
     
     @inbounds for nk in 1:nwin
         n0 = 1 + toff_samp + step * (nk - 1)
@@ -57,9 +58,10 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
 
         maac1 = maximum(ccmap)
         if maac1 > maac_th
-            dout["time_s"][nk] = (n0 - 1) / float(S.fs)
+            dout["time_s"][nk] = (n0 - 1 - toff_samp) / S.fs
             dout["maac"][nk,1] = maac1
-            dout["slowmap"][nk, :, :] .= ccmap
+            # dout["slowmap"][nk, :, :] .= ccmap
+            dout["slowmap"][nk]  = copy(ccmap)
 
             # calcula el contorno
             level = maac1*ccerr

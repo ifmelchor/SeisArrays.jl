@@ -76,6 +76,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout["sy"] = fill(NaN, nwin)
     dout["ratio"] = fill(NaN, nwin)
     dout["beam"]  = fill(NaN, nwin)
+    dout["fpeak"]  = fill(NaN, nwin)
     dout["baz"]   = fill(NaN, (nwin,3))
     dout["slow"]  = fill(NaN, (nwin,3))
     dout["baz_width"]  = fill(NaN, nwin)
@@ -272,6 +273,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                 # calcula el beam power
                 powbeam, fpeak = beam_analysis(window_data, S.xcoord, S.ycoord, lwin, S.fs, s_c[1], s_c[2], buf)
                 dout["beam"][nk] = powbeam
+                dout["fpeak"][nk] = fpeak
 
                 # calcula el SNRI
                 k_peak = slobnd[2]*fpeak
