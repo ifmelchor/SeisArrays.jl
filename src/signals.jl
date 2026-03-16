@@ -1,6 +1,13 @@
 #!/usr/local/bin julia
 # coding=utf-8
 
+"""
+    sigmoid
+"""
+function sigmoid(x::T; k::T=T(10.0), x0::T=T(0.0)) where {T<:Real}
+    return T(1) / (T(1) + exp(-k * (x - x0)))
+end
+
 
 """
     Filter signal

@@ -48,18 +48,21 @@ end
 
 
 
-function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
+function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05)
 
     c = contours(sx, sy, zmap, [level])
 
     if isempty(levels(c)) || isempty(lines(levels(c)[1]))
-        return false, NaN, [NaN, NaN], [NaN, NaN], [NaN, NaN]
+        return false, (NaN, NaN, NaN, [NaN, NaN, NaN, NaN], [NaN, NaN, NaN, NaN])
     end
 
     cl = lines(levels(c)[1])
     ncontour = length(cl)
     is_good   = false
     area_blob = 0.0
+    ratio = NaN
+    circularity = NaN
+    radii = NaN
 
     if ncontour == 0
         is_good = false
@@ -70,7 +73,7 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
         area_blob = contour_size(Xs, Ys)
         is_good = true
         idx = 1
-        ratio = -1.
+        ratio = NaN
         
     else
         # si hay mas de un contorno, 
@@ -111,53 +114,49 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05, C_th=0.3)
         perimeter += hypot(Xs[1]-Xs[n_pts], Ys[1]-Ys[n_pts])
         circularity = (perimeter > 0) ? (4 * π * area_blob) / (perimeter^2) : 0.0
 
-        if circularity < C_th
-            sx_mean = sy_mean = NaN
-            slobnd = bazbnd = [NaN, NaN]
-            return false, ratio, [sx_mean, sy_mean], slobnd, bazbnd
-        end
-
-        # calcula el centro geometrico
+        # centroide
         sx_mean, sy_mean = polygon_centroid(Xs, Ys)
-
-        # calcula el vector de lentitud medio
-        s_mean = hypot(sx_mean, sy_mean)
+        s_mean   = hypot(sx_mean, sy_mean)
         baz_mean = mod(atand(-sx_mean,-sy_mean), 360.0)
 
-        # calcula la incertidumbre dada por el contorno
+        # limites de lentitud
         slo_vec = hypot.(Xs, Ys)
         s_max = maximum(slo_vec)
         s_min = minimum(slo_vec)
-        slobnd = [s_min, s_mean, s_max, s_max-s_min]
+        s_width = s_max-s_min
+        slobnd = [s_min, s_mean, s_max, s_width]
 
+        # limites de back-azimuth
         ang = mod.(atand.(-Xs, -Ys), 360.0)
         sort!(ang)
         diffs = diff(ang)
         push!(diffs, 360.0 - (ang[end] - ang[1]))
         max_gap, idx_gap = findmax(diffs)
         width = 360.0 - max_gap
+        
         if max_gap > 180.0
             if idx_gap == length(diffs)
-                # El hueco es el cierre normal (no cruza el norte)
                 baz_min = ang[1]
                 baz_max = ang[end]
             else
-                # El hueco está en medio -> Los datos cruzan el norte
                 baz_min = ang[idx_gap + 1]
                 baz_max = ang[idx_gap]
             end
         else
             baz_min, baz_max = minimum(ang), maximum(ang)
         end
-        
-        bazbnd = [baz_min, baz_mean, baz_max, width]
 
+        if width < 180
+            radii = sqrt(0.5*s_width*s_mean * sin(0.5*width*π/180))
+        end
+
+        bazbnd = [baz_min, baz_mean, baz_max, width]
+    
     else
-        sx_mean = sy_mean = NaN
-        slobnd = bazbnd = [NaN, NaN]
+        slobnd = bazbnd = [NaN, NaN, NaN, NaN]
     end
 
-    return is_good, ratio, [sx_mean, sy_mean], slobnd, bazbnd
+    return is_good, (ratio, circularity, radii, slobnd, bazbnd)
 end
 
 
