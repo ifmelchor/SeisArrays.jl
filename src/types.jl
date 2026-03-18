@@ -29,8 +29,7 @@ struct SeisArray2D{T<:Real} <: AbstractSeisArray{T}
     end
 end
 
-
-struct ZLCC_WS_CPU{T<:Real}
+struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
     data::Matrix{T}
     dx::Vector{T}
     dy::Vector{T}
@@ -38,20 +37,25 @@ struct ZLCC_WS_CPU{T<:Real}
     
     lwin::Int
     nsta::Int
-    slomax_sq::T
+    slomax2::T
 
     # Grillas
-    sx::Vector{T}
-    sy::Vector{T}
-    sx2::Vector{T}
-    sy2::Vector{T}
+    s_grid::R
+    s_grid_c::R
+    s_grid_f::R
+
+    # tamaños
+    nite :: Int
+    nite_c :: Int
+    nite_f :: Int
     
     # Mapas
     ccmap::Matrix{T}
-    ccmap2::Matrix{T}
+    ccmap_c::Matrix{T}
+    ccmap_f::Matrix{T}
     
     # Buffers de trabajo
-    energy_bufs::Vector{Vector{T}}
+    benergy::Vector{T}
     beam::Vector{T}
 end
 

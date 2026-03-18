@@ -207,6 +207,4 @@ function interpolate_grids!(buffer_grid::AbstractMatrix, coarse_grid::AbstractMa
             buffer_grid[i, j] = etp_fine(sx, sy)
         end
     end
-
-    replace!(buffer_grid, NaN => Inf)
 end

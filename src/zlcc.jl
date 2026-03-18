@@ -12,7 +12,7 @@ function zlcc(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Rea
 end
 
 
-function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slowmax::Real, slowint::Real, toff::Real; slow0::AbstractVector{<:Real}=[0., 0.], ccerr::Real=0.95, maac_th::Real=0.5, slowmax2::Real=0.2, slowint2::Real=0.005, ratio_max::Real=0.05, slow2::Bool=false, use_gpu::Bool=false, stack::Bool=false, baz_th::Real=30.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing)
+function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slowmax::Real, toff::Real; slowint_c::Real=0.1, slowint_f::Real=0.01, ccerr::Real=0.95, maac_th::Real=0.3, slowfw::Real=0.5, ratio_max::Real=0.05, return_cmap::Bool=true, stack::Bool=false, baz_th::Real=30.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing)
     
     # filtramos los datos
     filter!(S, fmin, fmax)
@@ -23,77 +23,90 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
     step = round(Int, lwin * nadv)
     nwin = floor(Int, (npts - 2 * toff_samp - lwin) / step) + 1
 
-    # funcion de trabajo
-    use_gpu_flag = use_gpu && CUDA.functional()
-
-    ws, ws_gpu = init_zlcc_workspace(S, lwin, slow0, slowmax, slowint, slowmax2, slowint2, use_gpu=use_gpu_flag)
+    # inica buffers pre-allocados
+    n_threads = Threads.nthreads()
+    thread_buffers = [
+        init_zlcc_workspace(S, lwin, slowmax, slowint_c, slowfw, slowint_f)
+    for _ in 1:n_threads
+    ]
 
     # diccionario de guardado
     dout = Dict{String, Any}()
     dout["time_s"] = fill(NaN, nwin)
-    dout["maac"]   = fill(NaN, (nwin,2))
+    dout["maac"]   = fill(NaN, nwin)
     dout["sx"]     = fill(NaN, nwin)
     dout["sy"]     = fill(NaN, nwin)
-    dout["rms"]    = fill(NaN, nwin)
+    dout["beam"]   = fill(NaN, nwin)
     dout["baz"]    = fill(NaN, (nwin,3))
     dout["slow"]   = fill(NaN, (nwin,3))
-    dout["ratio"]  = fill(NaN, nwin)
+    dout["s_ratio"]  = fill(NaN, nwin)
+    dout["s_circ"]   = fill(NaN, nwin)
+    dout["s_radii"]  = fill(NaN, nwin)
     dout["baz_width"]  = fill(NaN, nwin)
     dout["slow_width"] = fill(NaN, nwin)
-    nite = length(ws.sx)
-    # dout["slowmap"] = fill(NaN, (nwin, nite, nite))
-    dout["slowmap"] = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
+
+    if return_cmap || stack
+        return_cmap = true
+        dout["slowmap"] = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
+    end
     
-    @inbounds for nk in 1:nwin
+    @inbounds @views Threads.@threads for nk in 1:nwin
         n0 = 1 + toff_samp + step * (nk - 1)
 
-        # calcula el mapa de lentitud aparente
-        if use_gpu_flag
-            _compute_ccmap!(ws_gpu, n0)
-            ccmap  = Array(ws.ccmap)
-        else
-            _compute_ccmap!(ws, n0)
-            ccmap = ws.ccmap
-        end
+        tid = Threads.threadid()
+        buf = thread_buffers[tid]
 
-        maac1 = maximum(ccmap)
-        if maac1 > maac_th
+        # calcula el mapa de lentitud aparente (coarser)
+        _compute_ccmap!(buf, n0)
+        maac, idxf = findmax(buf.ccmap_c)
+
+        if maac > maac_th
+            # busca el maximo
+            sx0 = buf.s_grid_c[idxf[1]]
+            sy0 = buf.s_grid_c[idxf[2]]
+
+            # calcula el mapa de lentitud aparente (finer)
+            _compute_ccmap!(buf, n0, sx0, sy0)
+
+            # interpola
+            rfx = buf.s_grid_f .+ sx0
+            rfy = buf.s_grid_f .+ sy0
+            interpolate_grids!(buf.ccmap, buf.ccmap_c, buf.ccmap_f, buf.s_grid, buf.s_grid_c, rfx, rfy)
+
+            # calcula el maac
+            maac, midx = findmax(buf.ccmap)
+            ii, jj = midx.I
+            best_sx = buf.s_grid[ii]
+            best_sy = buf.s_grid[jj]
+
             dout["time_s"][nk] = (n0 - 1 - toff_samp) / S.fs
-            dout["maac"][nk,1] = maac1
-            # dout["slowmap"][nk, :, :] .= ccmap
-            dout["slowmap"][nk]  = copy(ccmap)
+            dout["maac"][nk] = maac
+            dout["sx"][nk] = best_sx
+            dout["sy"][nk] = best_sy
+
+            if return_cmap
+                dout["slowmap"][nk]  = copy(buf.ccmap)
+            end
 
             # calcula el contorno
-            level = maac1*ccerr
-            is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(ws.sx, ws.sy, ccmap, level, ratio_max)
-            dout["ratio"][nk] = ratio
+            level = maac*ccerr
+            is_good, uncert = uncertainty_contour(buf.s_grid, buf.s_grid, buf.ccmap, level, ratio_max)
+            dout["s_ratio"][nk] = uncert[1]
+            dout["s_circ"][nk]  = uncert[2] # circularidad del contorno de íncertidumbre
 
             if is_good
-                # toma el resultado como válido
-                best_sx = s_c[1]
-                best_sy = s_c[2]
+                radii, slobnd, bazbnd = uncert[3], uncert[4], uncert[5]
+                dout["s_radii"][nk] = radii
 
-                if slow2
-                    _compute_ccmap!(ws, n0, best_sx, best_sy)
-                    maac2, midx = findmax(ws.ccmap2)
-                    ii, jj = midx.I
-                    best_sx = ws.sx2[ii]
-                    best_sy = ws.sy2[jj]
-                    # guarda el maac secundario
-                    dout["maac"][nk,2] = maac2
-                end
+                # guarda el power beam de la deteccion
+                dout["beam"][nk] = _power_beam(buf, n0, best_sx, best_sy)
 
-                # calcula el RMS de la deteccion
-                rms  = _power_beam(ws, n0, best_sx, best_sy)
-                dout["rms"][nk] = rms
-
-                # calcula vector de lentitud aparente
-                dout["sx"][nk] = best_sx
-                dout["sy"][nk] = best_sy
+                # guarda vector de lentitud aparente
                 dout["baz"][nk,1] = bazbnd[1]
                 dout["baz"][nk,2] = bazbnd[2]
                 dout["baz"][nk,3] = bazbnd[3]
                 dout["baz_width"][nk] = bazbnd[4]
+
                 dout["slow"][nk,1] = slobnd[1]
                 dout["slow"][nk,2] = slobnd[2]
                 dout["slow"][nk,3] = slobnd[3]
@@ -102,10 +115,10 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
         end
     end
 
-    mask = findall(!isnan, dout["maac"][:,1])
+    mask = findall(!isnan, dout["maac"])
 
     if isempty(mask)
-        ws = nothing
+        thread_buffers = nothing
         GC.gc()
         return nothing
     end
@@ -119,14 +132,12 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
         val = dout[key]
         if ndims(val) == 1
             final_dout[key] = val[mask]
-        elseif ndims(val) == 2
-            final_dout[key] = val[mask, :]
-        elseif ndims(val) == 3
+        else
             final_dout[key] = val[mask, :, :]
         end
     end
 
-    ws = nothing
+    thread_buffers = nothing
     GC.gc()
 
     if stack
@@ -140,7 +151,7 @@ end
 """
     functions for ZLCC
 """
-function init_zlcc_workspace(S::SeisArray2D, lwin, slow0, slowmax, slowint, slowmax2, slowint2; use_gpu=false)
+function init_zlcc_workspace(S::SeisArray2D, lwin, slowmax, slowint_c, slowfw, slowint_f)
     
     npts, nsta = size(S.data)
     
@@ -151,64 +162,59 @@ function init_zlcc_workspace(S::SeisArray2D, lwin, slow0, slowmax, slowint, slow
     
     # Iterador de pares (triángulo superior)
     citer = cciter(nsta)
-    
-    r = range(-slowmax, slowmax, step=slowint)
-    sx = collect(r .+ slow0[1])
-    sy = collect(r .+ slow0[2])
-    slomax2 = slowmax^2
 
-    # Fine grid
-    r2 = range(-slowmax2, slowmax2, step=slowint2)
-    sx2 = collect(r2)
-    sy2 = collect(r2)
+    # slowness maximo
+    slomax2 = slowmax*slowmax
+
+    # definición de los mapas de lentitud:
+    # coarser
+    s_grid_c  = -slowmax:slowint_c:slowmax
+    nite_c    = size(s_grid_c, 1)
+    
+    # finer
+    s_grid_f  = -slowfw:slowint_f:slowfw
+    nite_f  = size(s_grid_f, 1)
+    
+    # interpolated
+    s_grid = -slowmax:slowint_f:slowmax
+    nite   = size(s_grid, 1)
     
     # Buffers
-    ccmap = zeros(length(sx), length(sy))
-    ccmap2 = zeros(length(sx2), length(sy2))
-    
+    T = Float64
+    ccmap = zeros(T, nite, nite)
+    ccmap_c = zeros(T, nite_c, nite_c)
+    ccmap_f = zeros(T, nite_f, nite_f)
+
     # Buffer de energía independiente para cada hilo
-    energy_bufs = [zeros(nsta) for _ in 1:Threads.nthreads()]
-    beam = zeros(lwin)
+    benergy = zeros(T, nsta)
+    beam = zeros(T, lwin)
 
-    ws_cpu = ZLCC_WS_CPU(S.data, dx, dy, citer, lwin, nsta, slomax2, sx, sy, sx2, sy2, ccmap, ccmap2, energy_bufs, beam)
-    ws_gpu = nothing
+    ws = ZLCC_WS_CPU(S.data, dx, dy, citer, lwin, nsta, slomax2, s_grid, s_grid_c, s_grid_f, nite, nite_c, nite_f, ccmap, ccmap_c, ccmap_f, benergy, beam)
 
-    if use_gpu
-        # Mover todo a la GPU
-        d_data = CuArray(S.data)
-        d_dx = CuArray(dx)
-        d_dy = CuArray(dy)
-        d_sx = CuArray(sx)
-        d_sy = CuArray(sy)
-        d_ccmap = CUDA.zeros(length(sx), length(sy))
-        ws_gpu = ZLCC_WS_GPU(d_data, d_dx, d_dy, lwin, nsta, limit_sq, d_sx, d_sy, d_ccmap)
-    end
-
-    return ws_cpu, ws_gpu
+    return ws
 end
 
 
 
 function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int)
     
-    # desempaqueta
+    # desempaqueta (coarser)
     data   = ws.data
     dx, dy = ws.dx, ws.dy
     citer  = ws.citer
     lwin   = ws.lwin
-    ccmap  = ws.ccmap
-    sx, sy = ws.sx, ws.sy
-    limit_sq = ws.slomax_sq
-    
-    @inbounds Threads.@threads for j in 1:length(sy)
-        tid = Threads.threadid()
-        ebuf = ws.energy_bufs[tid]
+    ccmap  = ws.ccmap_c
+    limit_sq = ws.slomax2
+    sgrid = ws.s_grid_c
+    nite = ws.nite_c
+    ebuf = ws.benergy
 
-        py  = sy[j]
+    @inbounds for j in 1:nite
+        py  = sgrid[j]
         py2 = py^2
         
-        for i in 1:length(sx)
-            px = sx[i]
+        for i in 1:nite
+            px = sgrid[i]
             
             if (px^2 + py2) > limit_sq
                 ccmap[i, j] = 0.0
@@ -256,26 +262,23 @@ end
 
 function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
     
-    # desempaqueta
+    # desempaqueta (finer)
     data   = ws.data
     dx, dy = ws.dx, ws.dy
     citer  = ws.citer
     lwin   = ws.lwin
-    ebuf   = ws.energy
-    ccmap  = ws.ccmap2
-    sx     = ws.sx2
-    sy     = ws.sy2
-    limit_sq = ws.slomax_sq
+    limit_sq = ws.slomax2
+    ccmap  = ws.ccmap_f
+    sgrid = ws.s_grid_f
+    nite = ws.nite_f
+    ebuf = ws.benergy
     
-    @inbounds Threads.@threads for j in 1:length(sy)
-        tid = Threads.threadid()
-        ebuf = ws.energy_bufs[tid]
-
-        py  = sy[j] + sy0
+    @inbounds for j in 1:nite
+        py  = sgrid[j] + sy0
         py2 = py^2
         
-        for i in 1:length(sx)
-            px = sx[i] + sx0
+        for i in 1:nite
+            px = sgrid[i] + sx0
             
             if (px^2 + py2) > limit_sq
                 ccmap[i, j] = 0.0
@@ -288,7 +291,7 @@ function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
                 
                 start_idx = n0 + shift
                 
-                sq_sum = zero(T)
+                sq_sum = 0.0
                 @simd for k in 0:(lwin-1)
                     val = data[start_idx + k, s]
                     sq_sum = muladd(val, val, sq_sum)
@@ -297,7 +300,7 @@ function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
             end
             
             # Correlación Cruzada Sumada
-            cc_sum = zero(T)
+            cc_sum = 0.0
             for (sta_i, sta_j) in citer
                 shift_i = round(Int, px * dx[sta_i] + py * dy[sta_i])
                 shift_j = round(Int, px * dx[sta_j] + py * dy[sta_j])
@@ -305,7 +308,7 @@ function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
                 idx_i = n0 + shift_i
                 idx_j = n0 + shift_j
                 
-                dot_val = zero(T)
+                dot_val = 0.0
                 @simd for k in 0:(lwin-1)
                     val_i = data[idx_i + k, sta_i]
                     val_j = data[idx_j + k, sta_j]
