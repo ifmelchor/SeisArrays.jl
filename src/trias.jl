@@ -61,7 +61,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout = Dict{String, Any}()
     dout["time_s"]  = fill(NaN, nwin)
     dout["n_trios"] = fill(0, (nwin,3))
-    dout["delta_s"] = fill(NaN, nwin)
+    dout["kappa"] = fill(NaN, nwin)
     dout["misfit"]  = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
     dout["trios"] = [Vector{Any}() for _ in 1:nwin]
     fill!(dout["misfit"], nothing)
@@ -211,12 +211,15 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                 # ------------------------------------------
                 # 1.3 FILTRA POR TRIADAS ESPACIAL COHERENTES
                 # ------------------------------------------
-                nvalid2, quality_metrics, spatial_pass = clean_triads_space!(sx0, sy0, buf, trios, nvalid1, fpeak)
+                nvalid2, quality_metrics = clean_triads_space!(sx0, sy0, buf, trios, nvalid1, fpeak)
 
                 if nvalid2 >= 1
                     save = true
                     error_avg, cc_avg, D_mean = quality_metrics
-                    
+
+                    # ----------------------------------
+                    # 1.4 LENTITUD FROM GRID INTERPOLADO
+                    # ----------------------------------
                     if nvalid1 != nvalid2
                         # Re-calcula el grid grueso
                         misfitmap!(buf.coarser_map, buf, nvalid2, s_grid_c, s_grid_c, slomax2)
@@ -226,15 +229,36 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     else
                         sxf, syf = sx0, sy0
                     end
-
-                    # calcula el sesgo de la solución las tríadas que NO tienen resolución geométrica suficiente
-                    delta_s = sqrt((sxf - sx0)^2 + (syf - sy0)^2)
                     
                     # finer grid + interpolacion
                     rfx = rfine .+ sxf 
                     rfy = rfine .+ syf
                     misfitmap!(buf.finer_map, buf, nvalid2, rfx, rfy, slomax2)
                     interpolate_grids!(buf.like_map, buf.coarser_map, buf.finer_map, s_grid, s_grid_c, rfx, rfy)
+
+                    # replace NaN to Inf
+                    replace!(buf.like_map, NaN => Inf)
+
+                    # calcula la solucion final
+                    idxf = argmin(buf.like_map)
+                    sxf = s_grid[idxf[1]]
+                    syf = s_grid[idxf[2]]
+
+                    # -----------------------------------
+                    # 1.5 CALCULA CONSISTENCIA DE TRIADAS
+                    # -----------------------------------
+                    sum_sq_err = 0.0
+                    @inbounds for k in 1:nvalid2
+                        sx_local, sy_local = slowness_triad(buf.vt, k)
+                        dsx = sx_local - sxf
+                        dsy = sy_local - syf
+                        triad_con = dsx*dsx + dsy*dsy
+                        buf.vt.s_cons[k] = sqrt(triad_con)
+                        sum_sq_err += triad_con
+                    end
+                    sigma_s = sqrt(sum_sq_err / nvalid2)
+                    slow_f = sqrt(sxf*sxf + syf*syf)
+                    kappa = exp(-sigma_s/slow_f)
                 end
             end
         end
@@ -252,13 +276,11 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             @inbounds for k in 1:nvalid1
                 t_orig = buf.vt.t[k]
                 trio = trios[t_orig]
-                ccavg = buf.vt.cc[k]
-                tce = sqrt(buf.vt.err_sq[k])
-                push!(dout["trios"][nk], (trio.sta_triad, ccavg, tce, spatial_pass[k]))
+                trios_stats = (trio.sta_triad, buf.vt.cc[k], sqrt(buf.vt.err_sq[k]), buf.vt.spatial_res[k], buf.vt.s_cons[k])
+                push!(dout["trios"][nk], trios_stats)
             end
             
-            dout["misfit"][nk]  = copy(buf.like_map)
-            dout["delta_s"][nk] = delta_s
+            dout["misfit"][nk] = copy(buf.like_map)
             dout["fpeak"][nk] = fpeak
             dout["beam"][nk]  = powbeam
             dout["sx"][nk] = sxf
@@ -267,18 +289,19 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             # ---------------------------
             # 2.1 METRICAS DE CALIDAD
             # ---------------------------
+            dout["kappa"][nk] = kappa
             dout["cc_avg"][nk]  = cc_avg
             dout["dte_avg"][nk] = error_avg
             dout["D_avg"][nk] = D_mean
 
             # eta2
-            eta2 = sigmoid(-error_avg; x0=-1.) * sigmoid(D_mean; x0=0.5)
+            eta2 = kappa * sigmoid(-error_avg; x0=-1.) * sigmoid(D_mean; x0=0.5)
             dout["eta2"][nk] = eta2
 
             # ----------------------
             # 3 PSEUDO-VEROSIMILITUD
             # ----------------------
-            @. buf.like_map = exp(-sqrt(nvalid2) * eta2 * buf.like_map / sigma_min)
+            @. buf.like_map = exp(-sqrt(nvalid2 * eta2) * buf.like_map / sigma_min)
             
             # nivel de una desviacion estandar
             level = maximum(buf.like_map) / ℯ
@@ -460,8 +483,6 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
     cc_avg    = T(0.0)
     D_avg     = T(0.0)
 
-    spatial_pass = fill(NaN, n_valid_trios)
-
     @inbounds for k in 1:n_valid_trios
         t_orig = buf.vt.t[k]
         trio = trios[t_orig]
@@ -476,7 +497,6 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
 
         # FILTRO ESPACIAL
         if D_norm > 0.5
-            spatial_pass[k] = D_norm
             D_avg += D_norm
 
             closure_error = sqrt(buf.vt.err_sq[k])
@@ -498,6 +518,7 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
                 buf.vt.cc[k_vt_new] = buf.vt.cc[k]
                 buf.vt.w_base[k_vt_new] = buf.vt.w_base[k]
                 buf.vt.err_sq[k_vt_new] = buf.vt.err_sq[k]
+                buf.vt.spatial_res[k_vt_new] = D_norm
             end
             k_vt_new += 1
         end
@@ -506,13 +527,9 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
     n_valid_trios2 = k_vt_new-1
 
     if n_valid_trios2 >= 1
-        return n_valid_trios2,
-            (error_avg/n_valid_trios2, cc_avg/n_valid_trios2, D_avg/n_valid_trios2),
-            spatial_pass
+        return n_valid_trios2, (error_avg/n_valid_trios2, cc_avg/n_valid_trios2, D_avg/n_valid_trios2)
     else
-        return n_valid_trios2,
-            (T(NaN), T(NaN), T(NaN)),
-            spatial_pass
+        return n_valid_trios2, (T(NaN), T(NaN), T(NaN))
     end
 end
 
@@ -733,7 +750,9 @@ function init_buffers(nsta, n_pairs, n_trios, nite, nite_f, nite_c, lwin, fs, fm
         Vector{T}(undef, n_trios), # dt3
         Vector{T}(undef, n_trios), # cc
         Vector{T}(undef, n_trios), # w_base
-        Vector{T}(undef, n_trios)  # err_sq
+        Vector{T}(undef, n_trios), # err_sq
+        fill(T(NaN), n_trios), # slow_consistency
+        fill(T(NaN), n_trios) # spatial_res
     )
 
     buff = ThreadBuffers(ws, dt, cc, trio_error, trio_cc_avg, trio_w, vt, like_map, finer_map, coarser_map, sigma, station_mask, station_lags, windows, beam, beam_window_fft)
@@ -830,91 +849,30 @@ function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::Ab
 end
 
 
-function wals_stack(dout::Dict, mask::Vector{<:Integer}, s_grid::AbstractVector{T}, baz_th::Real, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, ccerr::Real=0.95, ratio_max::Real=0.05) where {T<:AbstractFloat}
-
-    raw_maac = dout["lmax"][mask]
-    raw_time = dout["time_s"][mask]
-    raw_rms  = dout["rms"][mask]
-    raw_baz  = dout["baz"][mask,2]
-    raw_slow = dout["slow"][mask,2]
-    raw_baz_width = dout["baz_width"][mask]
-    raw_lmap  = dout["likemap"][mask,:,:]
-
-    N_total = length(dout["time_s"])
-
-    if length(raw_time) == 0
-        return nothing
-    end
+function slowness_triad(vt::ValidTrios, k::Int)
+    # Diferencias de coordenadas
+    dx1 = vt.x1[k]; dy1 = vt.y1[k]
+    dx2 = vt.x2[k]; dy2 = vt.y2[k]
+    dx3 = vt.x3[k]; dy3 = vt.y3[k]
     
-    # Calcular máscara de Stacking
-    cond_baz_w = raw_baz_width .<= baz_th
+    # Delays
+    dt1 = vt.dt1[k]
+    dt2 = vt.dt2[k]
+    dt3 = vt.dt3[k]
 
-    if baz_lim !== nothing
-        bmin, bmax = baz_lim
-        if bmin <= bmax
-            cond_baz_lim = (raw_baz .>= bmin) .& (raw_baz .<= bmax)
-        else
-            cond_baz_lim = (raw_baz .>= bmin) .| (raw_baz .<= bmax)
-        end
-        mask_stack = cond_baz_w .& cond_baz_lim
-    else
-        mask_stack = cond_baz_w
-    end
-
-    nidx = findall(mask_stack)
-    count_stack = length(nidx)
-    prct_nidx = 100 * count_stack / N_total
-
-    stack_out = Dict{String, Any}()
-    stack_out["prct_nidx"] = prct_nidx
-    stack_out["nidx"]      = nidx
-    stack_out["time_s"]    = raw_time[nidx]
-
-    # statistics
-    stack_out["stats"] = Dict{String, Any}()
-    rms_vec  = raw_rms[nidx]
-    slow_vec = raw_slow[nidx]
-    baz_vec  = raw_baz[nidx]
-
-    w = raw_maac[nidx] # usamos el Lmax como peso
-    sum_w  = sum(w)
-    slow_avg = sum(slow_vec .* w) / sum_w
-    stack_out["stats"]["slow_avg"] = slow_avg
-    slow_var = sum(w .* (slow_vec .- slow_avg).^2) / sum_w
-    stack_out["stats"]["slow_std"] = sqrt(slow_var)
-    baz_avg, baz_std = circular_stats(baz_vec, w)
-    stack_out["stats"]["baz_avg"]  = baz_avg
-    stack_out["stats"]["baz_std"]  = baz_std
-    stack_out["stats"]["rms_mean"] = sum(rms_vec .* w) / sum_w
-
-    # slowmap Weighted Stack
-    raw_maps = raw_lmap[nidx, :, :]
-    w_stack = dropdims(sum(raw_maps .* reshape(w, :, 1, 1), dims=1), dims=1) ./ sum_w
-    stack_out["stackmap"] = w_stack
-
-    lmax = maximum(w_stack)
-    stack_out["lmax"] = lmax
-
-    is_good, ratio, s_c, slobnd, bazbnd = uncertainty_contour(s_grid, s_grid, w_stack, lmax * ccerr, ratio_max)
-    stack_out["ratio"] = ratio
-
-    stack_out["sx"]  = nothing
-    stack_out["sy"]  = nothing
-    stack_out["baz"]   = nothing
-    stack_out["slow"]  = nothing
-    stack_out["baz_width"]  = nothing
-    stack_out["slow_width"] = nothing
-
-    if is_good
-        # save apparent slowness
-        stack_out["sx"]  = s_c[1]
-        stack_out["sy"]  = s_c[2]
-        stack_out["baz"] = [bazbnd[1], bazbnd[2], bazbnd[3]]
-        stack_out["baz_width"] = bazbnd[4]
-        stack_out["slow"] = [slobnd[1], slobnd[2], slobnd[3]]
-        stack_out["slow_width"] = slobnd[4]
-    end
-
-    return stack_out
+    # Términos para Mínimos Cuadrados (M'M)s = M'd
+    # M = [dx1 dy1; dx2 dy2; dx3 dy3]
+    mtm_11 = dx1*dx1 + dx2*dx2 + dx3*dx3
+    mtm_12 = dx1*dy1 + dx2*dy2 + dx3*dy3
+    mtm_22 = dy1*dy1 + dy2*dy2 + dy3*dy3
+    mtd_1  = dx1*dt1 + dx2*dt2 + dx3*dt3
+    mtd_2  = dy1*dt1 + dy2*dt2 + dy3*dt3
+    det = mtm_11 * mtm_22 - mtm_12 * mtm_12
+    
+    inv_det = 1.0 / det
+    sx = inv_det * ( mtm_22 * mtd_1 - mtm_12 * mtd_2 )
+    sy = inv_det * (-mtm_12 * mtd_1 + mtm_11 * mtd_2 )
+    
+    return sx, sy
 end
 
