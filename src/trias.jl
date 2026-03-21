@@ -11,7 +11,7 @@ function trias(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Re
     return trias(SA, args...; kwargs...)
 end
 
-function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, ratio_max::T=0.25, tol_tce::T=0.7, min_cc::T=0.5, psr_th::T=5.0, error_max::T=0.5, gamma::T=2.0) where {T<:Real}
+function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, ratio_max::T=0.25, tol_tce::T=0.7, min_cc::T=0.5, psr_th::T=5.0, error_max::T=0.5) where {T<:Real}
 
     npts, nsta = size(S.data)
 
@@ -43,7 +43,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
 
     # define algunos parametros para el GCC
     B_FS  = 5
-    g_GCC = 2.0 # --> SCOT method
+    g_GCC = 2.0 # --> SCOT method (gamma)
     df_taper_FS = 0.2
     upsample  = 20
 
@@ -61,7 +61,6 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout = Dict{String, Any}()
     dout["time_s"]  = fill(NaN, nwin)
     dout["n_trios"] = fill(0, (nwin,3))
-    dout["kappa"] = fill(NaN, nwin)
     dout["misfit"]  = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
     dout["trios"] = [Vector{Any}() for _ in 1:nwin]
     fill!(dout["misfit"], nothing)
@@ -80,6 +79,8 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout["slow_width"] = fill(NaN, nwin)
 
     # metricas de calidad
+    dout["delta_s"] = fill(NaN, nwin)
+    dout["kappa"]   = fill(NaN, nwin)
     dout["cc_avg"]  = fill(NaN, nwin)
     dout["dte_avg"] = fill(NaN, nwin)
     dout["D_avg"]   = fill(NaN, nwin)
@@ -154,9 +155,8 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     cc123 = (c1 + c2 + c3) / 3.0
 
                     # guarda valores en buffer
-                    buf.trio_error[t] = closure
-                    buf.trio_cc_avg[t] = cc123
-                    
+                    # buf.trio_error[t] = closure
+                    # buf.trio_cc_avg[t] = cc123
                     # println(t, "  CCavg: ", buf.trio_cc_avg[t], "  TCE: ", closure)
 
                     # guardamos para el misfitmap
@@ -170,11 +170,8 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     buf.vt.dt1[k_vt] = dt1
                     buf.vt.dt2[k_vt] = dt2
                     buf.vt.dt3[k_vt] = dt3
-                    buf.vt.cc[k_vt] = cc123
-
-                    # Pesos pre-calculados
-                    buf.vt.w_base[k_vt] = cc123^gamma
-                    buf.vt.err_sq[k_vt] = closure^2
+                    buf.vt.cc[k_vt]  = cc123
+                    buf.vt.tce2[k_vt] = closure^2
                     k_vt += 1
                 end
             end
@@ -229,6 +226,11 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     else
                         sxf, syf = sx0, sy0
                     end
+
+                    # diferencia de lentitud (coarser)
+                    dsx = sx0 - sxf
+                    dsy = sy0 - syf
+                    delta_s = sqrt(dsx*dsx + dsy*dsy)
                     
                     # finer grid + interpolacion
                     rfx = rfine .+ sxf 
@@ -276,13 +278,14 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             @inbounds for k in 1:nvalid1
                 t_orig = buf.vt.t[k]
                 trio = trios[t_orig]
-                trios_stats = (trio.sta_triad, buf.vt.cc[k], sqrt(buf.vt.err_sq[k]), buf.vt.spatial_res[k], buf.vt.s_cons[k])
+                trios_stats = (trio.sta_triad, buf.vt.cc[k], sqrt(buf.vt.tce2[k]), buf.vt.spatial_res[k], buf.vt.s_cons[k])
                 push!(dout["trios"][nk], trios_stats)
             end
             
             dout["misfit"][nk] = copy(buf.like_map)
             dout["fpeak"][nk] = fpeak
             dout["beam"][nk]  = powbeam
+            dout["delta_s"][nk] = delta_s
             dout["sx"][nk] = sxf
             dout["sy"][nk] = syf
 
@@ -401,7 +404,7 @@ function misfitmap!(like_map::AbstractMatrix{T}, buf::ThreadBuffers, nvtrios::In
                 tmax *= tmax
 
                 # funcion peso
-                w_val = buf.vt.w_base[k] * exp(-buf.vt.err_sq[k] / tmax)
+                w_val = buf.vt.cc[k] * exp(-buf.vt.tce2[k] / tmax)
 
                 W_sum += w_val
                 R_sum += w_val * e_trio
@@ -435,7 +438,7 @@ function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, er
         t3 = abs(x3 * best_sx + y3 * best_sy)
         tau_max = inv_2 * (t1 + t2 + t3)
         
-        closure_error = sqrt(buf.vt.err_sq[k])
+        closure_error = sqrt(buf.vt.tce2[k])
         time_error = closure_error / (tau_max + sigma_val)
         
         # Si pasa el filtro, la mantenemos en el buffer
@@ -461,8 +464,7 @@ function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, er
                 buf.vt.dt2[k_vt_new] = buf.vt.dt2[k]
                 buf.vt.dt3[k_vt_new] = buf.vt.dt3[k]
                 buf.vt.cc[k_vt_new] = buf.vt.cc[k]
-                buf.vt.w_base[k_vt_new] = buf.vt.w_base[k]
-                buf.vt.err_sq[k_vt_new] = buf.vt.err_sq[k]
+                buf.vt.tce2[k_vt_new] = buf.vt.tce2[k]
             end
 
             k_vt_new += 1
@@ -499,7 +501,7 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
         if D_norm > 0.5
             D_avg += D_norm
 
-            closure_error = sqrt(buf.vt.err_sq[k])
+            closure_error = sqrt(buf.vt.tce2[k])
             error_avg += closure_error/(tau_max + sigma_val)
             cc_avg    += buf.vt.cc[k]
 
@@ -516,8 +518,7 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
                 buf.vt.dt2[k_vt_new] = buf.vt.dt2[k]
                 buf.vt.dt3[k_vt_new] = buf.vt.dt3[k]
                 buf.vt.cc[k_vt_new] = buf.vt.cc[k]
-                buf.vt.w_base[k_vt_new] = buf.vt.w_base[k]
-                buf.vt.err_sq[k_vt_new] = buf.vt.err_sq[k]
+                buf.vt.tce2[k_vt_new] = buf.vt.tce2[k]
                 buf.vt.spatial_res[k_vt_new] = D_norm
             end
             k_vt_new += 1
@@ -749,8 +750,7 @@ function init_buffers(nsta, n_pairs, n_trios, nite, nite_f, nite_c, lwin, fs, fm
         Vector{T}(undef, n_trios), # dt2
         Vector{T}(undef, n_trios), # dt3
         Vector{T}(undef, n_trios), # cc
-        Vector{T}(undef, n_trios), # w_base
-        Vector{T}(undef, n_trios), # err_sq
+        Vector{T}(undef, n_trios), # tce2
         fill(T(NaN), n_trios), # slow_consistency
         fill(T(NaN), n_trios) # spatial_res
     )

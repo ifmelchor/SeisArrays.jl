@@ -109,8 +109,7 @@ struct ValidTrios{T<:AbstractFloat, J<:Integer}
     dt2::Vector{T}
     dt3::Vector{T}
     cc::Vector{T}
-    w_base::Vector{T}
-    err_sq::Vector{T}
+    tce2::Vector{T}
     s_cons:: Vector{T}
     spatial_res::Vector{T}
 end
