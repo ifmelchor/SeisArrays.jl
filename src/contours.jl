@@ -48,36 +48,37 @@ end
 
 
 
-function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05)
+function uncertainty_contour(sx, sy, zmap, level)
+
+    ratio  = NaN
+    circty = NaN
+    radii  = NaN
+    slobnd = [NaN, NaN, NaN, NaN]
+    bazbnd = [NaN, NaN, NaN, NaN]
 
     c = contours(sx, sy, zmap, [level])
 
     if isempty(levels(c)) || isempty(lines(levels(c)[1]))
-        return false, (NaN, NaN, NaN, [NaN, NaN, NaN, NaN], [NaN, NaN, NaN, NaN])
+        return ratio, circty, radii, slobnd, bazbnd
     end
 
     cl = lines(levels(c)[1])
     ncontour = length(cl)
-    is_good   = false
-    area_blob = 0.0
-    ratio = NaN
-    circularity = NaN
-    radii = NaN
 
     if ncontour == 0
-        is_good = false
-        ratio = NaN
-
-    elseif ncontour == 1
+        return ratio, circty, radii, slobnd, bazbnd
+    end
+    
+    area_blob = 0.0
+    idx = 0
+    if ncontour == 1
         Xs, Ys    = coordinates(cl[1])
         area_blob = contour_size(Xs, Ys)
-        is_good = true
         idx = 1
         ratio = NaN
-        
     else
         # si hay mas de un contorno, 
-        # debemos analizar si el contorno es significativo
+        # toma por bueno el contorno dominante
         sizes = zeros(ncontour)
         for nc in 1:ncontour
             Xs, Ys = coordinates(cl[nc])
@@ -87,76 +88,64 @@ function uncertainty_contour(sx, sy, zmap, level, ratio_max=0.05)
         sort_idx = sortperm(sizes, rev=true)
         max_s = sizes[sort_idx[1]] # dominante
         sec_s = sizes[sort_idx[2]] # secundario
+
+        # calcula la relacion entre dominante y secundario
         ratio = sec_s / max_s
 
-        if ratio > ratio_max
-            # Ambigüedad real
-            is_good = false
-            # no calcula nada
-        else
-            # toma por bueno el contorno dominante
-            is_good   = true
-            area_blob = max_s
-            idx = sort_idx[1]
-        end
+        area_blob = max_s
+        idx = sort_idx[1]
     end
 
-    if is_good
-        # las coordenadas
-        Xs, Ys = coordinates(cl[idx])
+    Xs, Ys = coordinates(cl[idx])
 
-        # calcula la circularidad
-        perimeter = 0.0
-        n_pts = length(Xs)
-        @simd for i in 1:n_pts-1
-            perimeter += hypot(Xs[i+1]-Xs[i], Ys[i+1]-Ys[i])
-        end
-        perimeter += hypot(Xs[1]-Xs[n_pts], Ys[1]-Ys[n_pts])
-        circularity = (perimeter > 0) ? (4 * π * area_blob) / (perimeter^2) : 0.0
+    # calcula la circularidad
+    perim = 0.0
+    n_pts = length(Xs)
+    @inbounds for i in 1:n_pts-1
+        perim += hypot(Xs[i+1]-Xs[i], Ys[i+1]-Ys[i])
+    end
+    perim += hypot(Xs[1]-Xs[n_pts], Ys[1]-Ys[n_pts])
+    circty = (perim > 0) ? (4 * π * area_blob) / (perim^2) : 0.0
 
-        # centroide
-        sx_mean, sy_mean = polygon_centroid(Xs, Ys)
-        s_mean   = hypot(sx_mean, sy_mean)
-        baz_mean = mod(atand(-sx_mean,-sy_mean), 360.0)
+    # calcula el centroide
+    sx_mean, sy_mean = polygon_centroid(Xs, Ys)
+    s_mean   = hypot(sx_mean, sy_mean)
+    baz_mean = mod(atand(-sx_mean,-sy_mean), 360.0)
 
-        # limites de lentitud
-        slo_vec = hypot.(Xs, Ys)
-        s_max = maximum(slo_vec)
-        s_min = minimum(slo_vec)
-        s_width = s_max-s_min
-        slobnd = [s_min, s_mean, s_max, s_width]
+    # limites de lentitud
+    slo_vec = hypot.(Xs, Ys)
+    s_max = maximum(slo_vec)
+    s_min = minimum(slo_vec)
+    s_width = s_max-s_min
+    slobnd = [s_min, s_mean, s_max, s_width]
 
-        # limites de back-azimuth
-        ang = mod.(atand.(-Xs, -Ys), 360.0)
-        sort!(ang)
-        diffs = diff(ang)
-        push!(diffs, 360.0 - (ang[end] - ang[1]))
-        max_gap, idx_gap = findmax(diffs)
-        width = 360.0 - max_gap
-        
-        if max_gap > 180.0
-            if idx_gap == length(diffs)
-                baz_min = ang[1]
-                baz_max = ang[end]
-            else
-                baz_min = ang[idx_gap + 1]
-                baz_max = ang[idx_gap]
-            end
-        else
-            baz_min, baz_max = minimum(ang), maximum(ang)
-        end
-
-        if width < 180
-            radii = sqrt(0.5*s_width*s_mean * sin(0.5*width*π/180))
-        end
-
-        bazbnd = [baz_min, baz_mean, baz_max, width]
+    # limites de back-azimuth
+    ang = mod.(atand.(-Xs, -Ys), 360.0)
+    sort!(ang)
+    diffs = diff(ang)
+    push!(diffs, 360.0 - (ang[end] - ang[1]))
+    max_gap, idx_gap = findmax(diffs)
+    width = 360.0 - max_gap
     
+    if max_gap > 180.0
+        if idx_gap == length(diffs)
+            baz_min = ang[1]
+            baz_max = ang[end]
+        else
+            baz_min = ang[idx_gap + 1]
+            baz_max = ang[idx_gap]
+        end
     else
-        slobnd = bazbnd = [NaN, NaN, NaN, NaN]
+        baz_min, baz_max = minimum(ang), maximum(ang)
+    end
+    bazbnd = [baz_min, baz_mean, baz_max, width]
+
+    if width < 180
+        # calcula el radio del lóbulo de incertidumbre
+        radii = sqrt(0.5*s_width*s_mean * sin(0.5*width*π/180))
     end
 
-    return is_good, (ratio, circularity, radii, slobnd, bazbnd)
+    return ratio, circty, radii, slobnd, bazbnd
 end
 
 

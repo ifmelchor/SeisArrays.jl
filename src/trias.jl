@@ -11,7 +11,7 @@ function trias(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Re
     return trias(SA, args...; kwargs...)
 end
 
-function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, ratio_max::T=0.25, tol_tce::T=0.7, min_cc::T=0.5, psr_th::T=5.0, error_max::T=0.5) where {T<:Real}
+function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, tol_tce::T=0.7, min_cc::T=0.5, psr_th::T=5.0, error_max::T=0.5) where {T<:Real}
 
     npts, nsta = size(S.data)
 
@@ -64,27 +64,24 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout["misfit"]  = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
     dout["trios"] = [Vector{Any}() for _ in 1:nwin]
     fill!(dout["misfit"], nothing)
-
-    # estimacion del vector lentitud aparente
     dout["sx"] = fill(NaN, nwin)
     dout["sy"] = fill(NaN, nwin)
     dout["s_ratio"] = fill(NaN, nwin)
     dout["s_circ"]  = fill(NaN, nwin)
-    dout["s_radii"]  = fill(NaN, nwin)
-    dout["beam"]   = fill(NaN, nwin)
+    dout["s_radii"] = fill(NaN, nwin)
+    dout["beam_pow"]   = fill(NaN, nwin)
+    dout["beam_peak"] = fill(NaN, nwin)
     dout["fpeak"]  = fill(NaN, nwin)
     dout["baz"]   = fill(NaN, (nwin,3))
     dout["slow"]  = fill(NaN, (nwin,3))
     dout["baz_width"]  = fill(NaN, nwin)
     dout["slow_width"] = fill(NaN, nwin)
-
-    # metricas de calidad
-    dout["delta_s"] = fill(NaN, nwin)
-    dout["kappa"]   = fill(NaN, nwin)
-    dout["cc_avg"]  = fill(NaN, nwin)
-    dout["dte_avg"] = fill(NaN, nwin)
-    dout["D_avg"]   = fill(NaN, nwin)
-    dout["eta2"]    = fill(NaN, nwin)
+    dout["delta_s"]  = fill(NaN, nwin)
+    dout["CC_trios"] = fill(NaN, nwin)
+    dout["kappa"]    = fill(NaN, nwin)
+    dout["C_avg"]    = fill(NaN, nwin)
+    dout["D_avg"]    = fill(NaN, nwin)
+    dout["eta2"]     = fill(NaN, nwin)
 
     @views Threads.@threads for nk in 1:nwin
         # inicia el buffer
@@ -203,7 +200,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                 end
                 
                 # CALCULO DEL POWER BEAM Y FPEAK
-                powbeam, fpeak = beam_analysis(window_data, S.xcoord, S.ycoord, lwin, S.fs, sx0, sy0, buf)
+                powbeam, beampeak, fpeak = beam_analysis(window_data, S.xcoord, S.ycoord, lwin, S.fs, sx0, sy0, buf)
 
                 # ------------------------------------------
                 # 1.3 FILTRA POR TRIADAS ESPACIAL COHERENTES
@@ -249,18 +246,17 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     # -----------------------------------
                     # 1.5 CALCULA CONSISTENCIA DE TRIADAS
                     # -----------------------------------
-                    sum_sq_err = 0.0
                     @inbounds for k in 1:nvalid2
                         sx_local, sy_local = slowness_triad(buf.vt, k)
                         dsx = sx_local - sxf
                         dsy = sy_local - syf
-                        triad_con = dsx*dsx + dsy*dsy
-                        buf.vt.s_cons[k] = sqrt(triad_con)
-                        sum_sq_err += triad_con
+                        buf.vt.s_cons[k] = dsx*dsx + dsy*dsy
                     end
-                    sigma_s = sqrt(sum_sq_err / nvalid2)
-                    slow_f = sqrt(sxf*sxf + syf*syf)
-                    kappa = exp(-sigma_s/slow_f)
+
+                    s_cons_vals = [buf.vt.s_cons[k] for k in 1:nvalid2]
+                    sigma_s = median(s_cons_vals)
+                    slow_f  = sqrt(sxf*sxf + syf*syf)
+                    kappa   = exp(-sigma_s / slow_f)
                 end
             end
         end
@@ -282,20 +278,22 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                 push!(dout["trios"][nk], trios_stats)
             end
             
-            dout["misfit"][nk] = copy(buf.like_map)
-            dout["fpeak"][nk] = fpeak
-            dout["beam"][nk]  = powbeam
-            dout["delta_s"][nk] = delta_s
             dout["sx"][nk] = sxf
             dout["sy"][nk] = syf
+            dout["misfit"][nk] = copy(buf.like_map)
+            dout["delta_s"][nk]  = delta_s
+            
+            dout["fpeak"][nk] = fpeak
+            dout["beam_peak"][nk] = beampeak
+            dout["beam_pow"][nk]  = powbeam
 
             # ---------------------------
             # 2.1 METRICAS DE CALIDAD
             # ---------------------------
-            dout["kappa"][nk] = kappa
-            dout["cc_avg"][nk]  = cc_avg
-            dout["dte_avg"][nk] = error_avg
-            dout["D_avg"][nk] = D_mean
+            dout["CC_trios"][nk] = cc_avg
+            dout["kappa"][nk]    = kappa
+            dout["C_avg"][nk]    = error_avg
+            dout["D_avg"][nk]    = D_mean
 
             # eta2
             eta2 = kappa * sigmoid(-error_avg; x0=-1.) * sigmoid(D_mean; x0=0.5)
@@ -312,30 +310,29 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             # ----------------------
             # 3.1 INCERTIDUMBRE
             # ----------------------
-            is_good, uncert = uncertainty_contour(s_grid, s_grid, buf.like_map, level, ratio_max)
+            uncert = uncertainty_contour(s_grid, s_grid, buf.like_map, level)
+
             dout["s_ratio"][nk] = uncert[1]
             dout["s_circ"][nk]  = uncert[2] # circularidad del contorno de íncertidumbre
+            dout["s_radii"][nk] = uncert[3]
+            
+            # SLOW min, SLOW central, SLOW max
+            slobnd = uncert[4]
+            dout["slow"][nk,1] = slobnd[1]
+            dout["slow"][nk,2] = slobnd[2]
+            dout["slow"][nk,3] = slobnd[3]
+            dout["slow_width"][nk] = slobnd[4]
 
-            if is_good
-                radii, slobnd, bazbnd = uncert[3], uncert[4], uncert[5]
-                dout["s_radii"][nk] = radii
-                # existe un unico contorno claro de solucion
-                # BAZ min, BAZ central, BAZ max
-                dout["baz"][nk,1] = bazbnd[1]
-                dout["baz"][nk,2] = bazbnd[2]
-                dout["baz"][nk,3] = bazbnd[3]
-                dout["baz_width"][nk] = bazbnd[4]
-
-                # SLOW min, SLOW central, SLOW max
-                dout["slow"][nk,1] = slobnd[1]
-                dout["slow"][nk,2] = slobnd[2]
-                dout["slow"][nk,3] = slobnd[3]
-                dout["slow_width"][nk] = slobnd[4]
-            end
+            # BAZ min, BAZ central, BAZ max
+            bazbnd = uncert[5]
+            dout["baz"][nk,1] = bazbnd[1]
+            dout["baz"][nk,2] = bazbnd[2]
+            dout["baz"][nk,3] = bazbnd[3]
+            dout["baz_width"][nk] = bazbnd[4]
         end
     end
 
-    mask = findall(!isnan, dout["time_s"])
+    mask = findall(x -> !isnan(x), dout["time_s"])
 
     if isempty(mask)
         return nothing
@@ -804,7 +801,7 @@ function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::Ab
         beam[idx] = zero(T)
     end
 
-    # suma amplitudes
+    # construye el beam
     @inbounds for k in eachindex(station_mask)
         if station_mask[k]
             lag = station_lags[k]
@@ -814,27 +811,31 @@ function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::Ab
         end
     end
 
-    # calcula potenia
+    # calcula potenia del beam
     power_sum = 0.0
-    @inbounds for idx in 1:n_samples
+    @inbounds @simd for idx in 1:n_samples
         val = beam[idx]
-        power_sum += val*val
+        power_sum = muladd(val, val, power_sum)
     end
     norm_factor = T(n_active * n_active) * T(n_samples)
     beam_power = power_sum / norm_factor
 
-     # Aplicar el FFT usando tappering
+     # Peak value and prepare fft_buf
+    max_abs = 0.0
     taper_window = buf.beam_window[n_samples]
     @inbounds for i in 1:n_samples
-        fft_ws[i] = beam[i] * taper_window[i] + 0im
+        val = beam[i]
+        max_abs = max(max_abs, abs(val))
+        fft_ws[i] = Complex{T}(val * taper_window[i])
     end
+    beam_peak = max_abs / n_active
+
     fft!(view(fft_ws, 1:n_samples))
 
     # Encontrar pico
     max_power = 0.0
     idx_max = 1
     half_n = div(n_samples, 2) + 1
-
     @inbounds for i in 1:half_n
         power = abs2(fft_ws[i])
         if power > max_power
@@ -842,10 +843,9 @@ function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::Ab
             idx_max = i
         end
     end
-
     fpeak = (idx_max - 1) * fsem / n_samples
 
-    return power_sum/norm_factor, fpeak
+    return beam_power, beam_peak, fpeak
 end
 
 

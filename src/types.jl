@@ -57,6 +57,8 @@ struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
     # Buffers de trabajo
     benergy::Vector{T}
     beam::Vector{T}
+    taper::Vector{Float64}
+    fft_buf::Vector{ComplexF64}
 end
 
 

@@ -1,6 +1,6 @@
-using SAP
+using SeisArrays
 using Test
 
-@testset "SAP.jl" begin
+@testset "SeisArrays.jl" begin
     # Write your tests here.
 end

@@ -37,6 +37,8 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
     dout["sx"]     = fill(NaN, nwin)
     dout["sy"]     = fill(NaN, nwin)
     dout["beam"]   = fill(NaN, nwin)
+    dout["beam_max"] = fill(NaN, nwin)
+    dout["fpeak"]   = fill(NaN, nwin)
     dout["baz"]    = fill(NaN, (nwin,3))
     dout["slow"]   = fill(NaN, (nwin,3))
     dout["s_ratio"]  = fill(NaN, nwin)
@@ -88,34 +90,36 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
                 dout["slowmap"][nk]  = copy(buf.ccmap)
             end
 
-            # calcula el contorno
+            # calcula metricas del beam
+            beam, bpeak, fpeak = _power_beam(buf, n0, S.fs, best_sx, best_sy)
+            dout["beam"][nk]     = beam
+            dout["beam_max"][nk] = bpeak
+            dout["fpeak"][nk]    = fpeak
+
+            # calcula la incertidumbre
             level = maac*ccerr
-            is_good, uncert = uncertainty_contour(buf.s_grid, buf.s_grid, buf.ccmap, level, ratio_max)
+            uncert = uncertainty_contour(buf.s_grid, buf.s_grid, buf.ccmap, level)
             dout["s_ratio"][nk] = uncert[1]
             dout["s_circ"][nk]  = uncert[2] # circularidad del contorno de íncertidumbre
+            dout["s_radii"][nk] = uncert[3]
 
-            if is_good
-                radii, slobnd, bazbnd = uncert[3], uncert[4], uncert[5]
-                dout["s_radii"][nk] = radii
+            # SLOW min, SLOW central, SLOW max
+            slobnd = uncert[4]
+            dout["slow"][nk,1] = slobnd[1]
+            dout["slow"][nk,2] = slobnd[2]
+            dout["slow"][nk,3] = slobnd[3]
+            dout["slow_width"][nk] = slobnd[4]
 
-                # guarda el power beam de la deteccion
-                dout["beam"][nk] = _power_beam(buf, n0, best_sx, best_sy)
-
-                # guarda vector de lentitud aparente
-                dout["baz"][nk,1] = bazbnd[1]
-                dout["baz"][nk,2] = bazbnd[2]
-                dout["baz"][nk,3] = bazbnd[3]
-                dout["baz_width"][nk] = bazbnd[4]
-
-                dout["slow"][nk,1] = slobnd[1]
-                dout["slow"][nk,2] = slobnd[2]
-                dout["slow"][nk,3] = slobnd[3]
-                dout["slow_width"][nk] = slobnd[4]
-            end
+            # BAZ min, BAZ central, BAZ max
+            bazbnd = uncert[5]
+            dout["baz"][nk,1] = bazbnd[1]
+            dout["baz"][nk,2] = bazbnd[2]
+            dout["baz"][nk,3] = bazbnd[3]
+            dout["baz_width"][nk] = bazbnd[4]
         end
     end
 
-    mask = findall(!isnan, dout["maac"])
+    mask = findall(x -> !isnan(x), dout["maac"])
 
     if isempty(mask)
         thread_buffers = nothing
@@ -123,9 +127,9 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
         return nothing
     end
 
-    if stack
-        stack_dout = zlcc_stack(dout, mask, ws, maac_th, baz_th, baz_lim, ccerr, ratio_max)
-    end
+    # if stack
+    #     stack_dout = zlcc_stack(dout, mask, ws, maac_th, baz_th, baz_lim, ccerr)
+    # end
     
     final_dout = Dict{String, Any}()
     for key in keys(dout)
@@ -140,11 +144,11 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
     thread_buffers = nothing
     GC.gc()
 
-    if stack
-        return final_dout, stack_dout
-    else
-        return final_dout
-    end
+    # if stack
+    #     return final_dout, stack_dout
+    # else
+    return final_dout
+    # end
 end
 
 
@@ -188,8 +192,13 @@ function init_zlcc_workspace(S::SeisArray2D, lwin, slowmax, slowint_c, slowfw, s
     # Buffer de energía independiente para cada hilo
     benergy = zeros(T, nsta)
     beam = zeros(T, lwin)
+    all_windows = haning_windows(lwin)
+    taper = all_windows[lwin]
 
-    ws = ZLCC_WS_CPU(S.data, dx, dy, citer, lwin, nsta, slomax2, s_grid, s_grid_c, s_grid_f, nite, nite_c, nite_f, ccmap, ccmap_c, ccmap_f, benergy, beam)
+    N_pad = nextpow(2, lwin * 4)
+    fft_buf = Vector{ComplexF64}(undef, N_pad)
+
+    ws = ZLCC_WS_CPU(S.data, dx, dy, citer, lwin, nsta, slomax2, s_grid, s_grid_c, s_grid_f, nite, nite_c, nite_f, ccmap, ccmap_c, ccmap_f, benergy, beam, taper, fft_buf)
 
     return ws
 end
@@ -323,19 +332,21 @@ function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
 end
 
 
+function _power_beam(ws::ZLCC_WS_CPU, n0::Int, fs, sx0, sy0)
 
-function _power_beam(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
-
-    # zero-allocation reset
-    fill!(ws.beam, 0.0)
-    
     # Desempaquetar
     data = ws.data
     dx, dy = ws.dx, ws.dy
     beam = ws.beam
     lwin = ws.lwin
     nsta = ws.nsta
+    fft_buf = ws.fft_buf
+    taper = ws.taper
 
+    # zero-allocation reset
+    fill!(beam, 0.0)
+    fill!(fft_buf, 0.0im)
+    
     # Stacking (Beamforming)
     @inbounds for ii in 1:nsta
         delay = sx0 * dx[ii] + sy0 * dy[ii]
@@ -350,13 +361,39 @@ function _power_beam(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
     sum_sq = 0.0
     @inbounds @simd for k in 1:lwin
         val = beam[k]
-        # Fused Multiply-Add: val*val + sum_sq
         sum_sq = muladd(val, val, sum_sq)
     end
+    rms_val = sqrt(sum_sq / lwin) / nsta
 
-    return sqrt(sum_sq / lwin) / nsta
+    # Peak value and prepare fft_buf
+    max_sq = 0.0
+    @inbounds for i in 1:lwin
+        val = beam[i]
+        max_sq = max(max_sq, abs(val))
+        fft_buf[i] = val * taper[i]
+    end
+    peak_val = max_sq / nsta
+
+    # perform fft
+    fft!(fft_buf)
+
+    # pico de potencia espectral
+    max_power = 0.0
+    idx_max = 1
+    half_n  = div(length(fft_buf), 2) + 1
+
+    @inbounds for i in 1:half_n
+        power = abs2(fft_buf[i])
+        if power > max_power
+            max_power = power
+            idx_max = i
+        end
+    end
+
+    fpeak = (idx_max - 1) * fs / length(fft_buf)
+
+    return rms_val, peak_val, fpeak
 end
-
 
 
 function zlcc_stack(dout::Dict, mask::Vector{<:Integer}, ws::ZLCC_WS_CPU, maac_th::Real, baz_th::Real, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, ccerr::Real=0.95, ratio_max::Real=0.05)
