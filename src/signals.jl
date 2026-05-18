@@ -144,6 +144,7 @@ function cc_overlap(s_ref::AbstractVector, s_mov::AbstractVector, lag::Int, N::I
 end
 
 
+
 function haning_windows(lwin::Int, ::Type{T}=Float64) where {T<:AbstractFloat}
 
     windows = Vector{Vector{T}}(undef, lwin)
@@ -163,3 +164,4 @@ function haning_windows(lwin::Int, ::Type{T}=Float64) where {T<:AbstractFloat}
 
     return windows
 end
+

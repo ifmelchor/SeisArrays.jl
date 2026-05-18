@@ -1,6 +1,18 @@
 #!/usr/local/bin julia
 # coding=utf-8
 
+function cciter(nsta::J) where J<:Integer
+    cciter = Vector{Tuple{J,J}}()
+    for ii in 1:nsta-1
+        for jj in ii+1:nsta
+            push!(cciter, (ii, jj))
+        end
+    end
+
+    return cciter
+end
+
+
 
 function array_transfunc(S::SeisArray2D, slomax::Real, sloinc::Real, fmin::Real, fmax::Real, finc::Real)
 
@@ -14,6 +26,7 @@ function array_transfunc(S::SeisArray2D, slomax::Real, sloinc::Real, fmin::Real,
 
     return s_vals, power
 end
+
 
 
 function array_transfunc!(power, x::AbstractVector{T}, y::AbstractVector{T}, s_grid::AbstractVector{T}, omegas::AbstractVector{T}) where T<:Real
@@ -81,44 +94,6 @@ end
 
 
 
-function cciter(nsta::J) where J<:Integer
-    cciter = Vector{Tuple{J,J}}()
-    for ii in 1:nsta-1
-        for jj in ii+1:nsta
-            push!(cciter, (ii, jj))
-        end
-    end
-
-    return cciter
-end
-
-
-
-function cross_pair_dist(S::SeisArray2D, pairs)
-    cross_pair_dist(S.xcoord, S.ycoord, pairs)
-end
-
-
-
-function cross_pair_dist(x_coords, y_coords, pairs)
-    num_pairs = length(pairs)
-    dx_full = zeros(num_pairs)
-    dy_full = zeros(num_pairs)
-    dist_full = zeros(num_pairs)
-    @inbounds for k in 1:num_pairs
-        i, j = pairs[k]
-        dx = x_coords[j] - x_coords[i]
-        dy = y_coords[j] - y_coords[i]
-        dx_full[k] = dx
-        dy_full[k] = dy
-        dist_full[k] = sqrt(dx*dx + dy*dy)
-    end
-
-    return dx_full, dy_full, dist_full
-end
-
-
-
 function get_slowness_coord(slow::T, bazm::T, slow0::Vector{T}, slowmax::T, slowint::T) where T<:Real
 
     rad = deg2rad(bazm)
@@ -155,81 +130,5 @@ function get_delays(slow::T, bazm::T, slow0::Vector{T}, slowmax::T, slowint::T, 
     return dt, [px, py]
 end
 
-
-
-function init_triads(S::SeisArray2D)
-    init_triads(S.xcoord, S.ycoord)
-end
-
-
-function init_triads(x_coords, y_coords)
-    nsta = length(x_coords)
-    
-    # calcula el centroide
-    # centroid_x = sum(x_coords) / nsta
-    # centroid_y = sum(y_coords) / nsta
-    # centroid = (centroid_x, centroid_y)
-
-    # genera los pares
-    pairs = cciter(nsta)
-
-    # Calcula las métricas de los pares
-    dx, dy, dd = cross_pair_dist(x_coords, y_coords, pairs)
-
-    # Construimos las tríadas
-    trios = init_triads(nsta, pairs, dd)
-
-    return pairs, dx, dy, dd, trios
-end
-
-
-function init_triads(nsta::Int, pairs, dd)
-    triangles = Vector{TriangleDef}()
-    pair_map = zeros(Int, nsta, nsta)
-
-    # Mapeo de pares
-    @inbounds for (idx, p) in enumerate(pairs)
-        u, v = p
-        pair_map[u, v] = idx
-        pair_map[v, u] = idx
-    end
-
-    sizehint!(triangles, div(nsta^3, 6))
-
-    # Busca triangulos i < j < k
-    @inbounds for i in 1:nsta
-        for j in (i+1):nsta
-            for k in (j+1):nsta
-                trio = (i, j, k)
-                idx_ij = pair_map[i, j]
-                idx_jk = pair_map[j, k]
-                idx_ki = pair_map[k, i]
-
-                if idx_ij > 0 && idx_jk > 0 && idx_ki > 0
-                    # Lee distancia máxima de esta tríada
-                    a = dd[idx_ij]
-                    b = dd[idx_jk]
-                    c = dd[idx_ki]
-                    dmax = max(a, b, c)
-                    dmean = (a+b+c)/3
-
-                    # calcula la regularidad geométrica
-                    s = (a+b+c)/2
-                    area = sqrt(max(0.0,s*(s-a)*(s-b)*(s - c)))
-                    Q = (4.0*sqrt(3.0)*area) / (a*a + b*b + c*c)
-
-                    # Determinamos los signos
-                    s1 = (pairs[idx_ij] == (i,j)) ? 1.0 : -1.0
-                    s2 = (pairs[idx_jk] == (j,k)) ? 1.0 : -1.0
-                    s3 = (pairs[idx_ki] == (k,i)) ? 1.0 : -1.0
-
-                    push!(triangles, TriangleDef(trio, idx_ij, idx_jk, idx_ki, s1, s2, s3, dmax, dmean, Q))
-                end
-            end
-        end
-    end
-
-    return triangles
-end
 
 

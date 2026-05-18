@@ -4,6 +4,8 @@
 abstract type AbstractSeisArray{T} end
 
 
+
+
 struct SeisArray2D{T<:Real} <: AbstractSeisArray{T}
     xcoord::Vector{T} # coordenadas UTM (eastern) en km
     ycoord::Vector{T} # coordenadas UTM (northing) en km
@@ -28,6 +30,8 @@ struct SeisArray2D{T<:Real} <: AbstractSeisArray{T}
         new{T}(x, y, data, Float64(fs))
     end
 end
+
+
 
 struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
     data::Matrix{T}
@@ -59,104 +63,4 @@ struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
     beam::Vector{T}
     taper::Vector{Float64}
     fft_buf::Vector{ComplexF64}
-end
-
-
-struct FSGCC_ws{P1, P2}
-    # Parámetros
-    fs::Float64        # Sampling rate
-    n::Int             # Tamaño de la señal
-    n_fft::Int         # Tamaño con Zero-Padding
-    n_up::Int          # Tamaño interpolado
-    B::Int
-    n_gamma::Float64
-    
-    # Buffers temporales
-    buf_s1::Vector{Float64}
-    buf_s2::Vector{Float64}
-    window::Vector{Float64} # Ventana de Hann pre-calculada
-    
-    # Buffers Frecuenciales
-    n_freq::Int
-    S1::Vector{ComplexF64}
-    S2::Vector{ComplexF64}
-    G12::Vector{ComplexF64}
-    G12_smooth::Vector{ComplexF64}
-    G11_smooth::Vector{Float64}
-    G22_smooth::Vector{Float64}
-    
-    # mascara de banda de frequencia
-    mask::Vector{Float64}
-    
-    # Buffer de interpolación (Upsampling)
-    n_freq_up::Int
-    C_up_freq::Vector{ComplexF64}
-    C_up_time::Vector{Float64} # Resultado final en tiempo
-    
-    # Planes de FFT (Lo más costoso de crear)
-    plan_fwd::P1
-    plan_inv::P2
-end
-
-
-struct ValidTrios{T<:AbstractFloat, J<:Integer}
-    t::Vector{J}
-    x1::Vector{T}
-    y1::Vector{T}
-    x2::Vector{T}
-    y2::Vector{T}
-    x3::Vector{T}
-    y3::Vector{T}
-    dt1::Vector{T}
-    dt2::Vector{T}
-    dt3::Vector{T}
-    cc::Vector{T}
-    tce2::Vector{T}
-    s_cons:: Vector{T}
-    spatial_res::Vector{T}
-end
-
-
-struct ThreadBuffers{T<:AbstractFloat}
-    fsgcc_ws    :: FSGCC_ws 
-    dt          :: Vector{T}
-    cc          :: Vector{T}
-
-    trio_error  :: Vector{T}
-    trio_cc_avg :: Vector{T}
-    trio_w      :: Vector{T}
-    vt          :: ValidTrios
-    
-    like_map    :: Matrix{T}
-    finer_map   :: Matrix{T}
-    coarser_map :: Matrix{T}
-
-    sigma       :: T
-
-    station_mask::BitVector
-    station_lags::Vector{Int}
-    beam_window::Vector{Vector{T}}
-    beam::Vector{T}
-    beam_window_fft::Vector{Complex{T}}
-end
-
-
-struct TriangleDef
-    # indicadores de la triada
-    sta_triad::Tuple{Int, Int, Int}
-
-    # indicides de los pares
-    p1_idx::Int
-    p2_idx::Int
-    p3_idx::Int
-
-    # signo del delay
-    s1::Float64
-    s2::Float64
-    s3::Float64
-
-    # distancia maxima/media del triangulo
-    dmax::Float64
-    dmean::Float64
-    Q::Float64
 end

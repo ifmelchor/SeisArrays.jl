@@ -16,6 +16,7 @@ module SeisArrays
     include("types.jl")
     include("utils.jl")
     include("signals.jl")
+    include("gcc.jl")
     include("contours.jl")
 
     # Zero Lag Cross Correlation

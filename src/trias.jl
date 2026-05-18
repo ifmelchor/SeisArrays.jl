@@ -4,6 +4,94 @@
 # GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
  # TRIAS (TRIad-based Adaptive Slowness)
 
+struct TriadParams{T<:AbstractFloat, J<:Integer}
+    t::Vector{J}
+    x1::Vector{T}
+    y1::Vector{T}
+    x2::Vector{T}
+    y2::Vector{T}
+    x3::Vector{T}
+    y3::Vector{T}
+    dt1::Vector{T}
+    dt2::Vector{T}
+    dt3::Vector{T}
+    cc_avg::Vector{T}
+    closure::Vector{T}
+    sigma::Vector{T}
+    apert_eff::Vector{T} # apertura efectiva [km]
+    sx::Vector{T}      # local sx component [s/km]
+    sy::Vector{T}      # local sy component [s/km]
+    delta_s2:: Vector{T} # cuadrado de la distancia euclidiana con respecto a global sx, sy 
+end
+
+
+struct ThreadBuffers{T<:AbstractFloat}
+    fsgcc_ws    :: FSGCC_ws 
+    dt          :: Vector{T}
+    cc          :: Vector{T}
+    sigma       :: Vector{T}
+
+    trios       :: TriadParams
+    
+    like_map    :: Matrix{T}
+    finer_map   :: Matrix{T}
+    coarser_map :: Matrix{T}
+
+    station_mask::BitVector
+    station_lags::Vector{Int}
+    beam_window::Vector{Vector{T}}
+    beam::Vector{T}
+    beam_window_fft::Vector{Complex{T}}
+end
+
+
+function init_buffers(nsta, n_pairs, n_trios, nite, nite_f, nite_c, lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
+
+    T = Float64
+
+    # Inicializa FS-PHAT
+    ws = init_fsgcc(lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
+
+    # Buffers de correlación y delays
+    dt = zeros(T, n_pairs)
+    cc = zeros(T, n_pairs)
+    sigma = zeros(T, n_pairs)
+
+    # Buffers de tríos
+    triad = TriadParams(
+        Vector{Int}(undef, n_trios), # t
+        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x1, y1
+        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x2, y2
+        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x3, y3
+        Vector{T}(undef, n_trios), # dt1
+        Vector{T}(undef, n_trios), # dt2
+        Vector{T}(undef, n_trios), # dt3
+        Vector{T}(undef, n_trios), # cc_avg
+        Vector{T}(undef, n_trios), # closure
+        Vector{T}(undef, n_trios), # sx local
+        Vector{T}(undef, n_trios), # sy local
+        Vector{T}(undef, n_trios), # aperture effective
+        Vector{T}(undef, n_trios)  # distancia euclidiana a sx,sy global
+    )
+
+    # Buffers de likelihood
+    like_map = zeros(T, nite, nite)
+    finer_map   = zeros(T, nite_f, nite_f)
+    coarser_map = zeros(T, nite_c, nite_c)
+
+    # beam analysis
+    station_mask = falses(nsta)
+    station_lags = zeros(Int, nsta)
+    windows = haning_windows(lwin, T)
+    beam = zeros(T, lwin)
+    beam_window_fft = zeros(Complex{T}, lwin)
+
+    buff = ThreadBuffers(ws, dt, cc, sigma, triad, like_map, finer_map, coarser_map, station_mask, station_lags, windows, beam, beam_window_fft)
+    
+    return buff
+end
+
+
 function trias(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Real, args...; kwargs...)
     
     SA = SeisArray2D(x, y, data, fs)
@@ -11,7 +99,8 @@ function trias(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Re
     return trias(SA, args...; kwargs...)
 end
 
-function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, tol_tce::T=0.7, min_cc::T=0.5, psr_th::T=5.0, error_max::T=0.5) where {T<:Real}
+
+function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=2.5, slowint_c::T=0.1, slowint_f::T=0.01, slowfw::T=0.5, min_cc::T=0.5, psr_th::T=5.0, C_max::T=0.5) where {T<:Real}
 
     npts, nsta = size(S.data)
 
@@ -48,7 +137,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     upsample  = 20
 
     # resolucion mínima
-    sigma_min = 1/(S.fs)
+    sigma_min = 1/(upsample*S.fs)
 
     # inicialización de Buffers
     n_threads = Threads.nthreads()
@@ -76,11 +165,11 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
     dout["slow"]  = fill(NaN, (nwin,3))
     dout["baz_width"]  = fill(NaN, nwin)
     dout["slow_width"] = fill(NaN, nwin)
-    dout["delta_s"]  = fill(NaN, nwin)
     dout["CC_trios"] = fill(NaN, nwin)
     dout["kappa"]    = fill(NaN, nwin)
     dout["C_avg"]    = fill(NaN, nwin)
     dout["D_avg"]    = fill(NaN, nwin)
+    dout["S_med"]    = fill(NaN, nwin)
     dout["eta2"]     = fill(NaN, nwin)
 
     @views Threads.@threads for nk in 1:nwin
@@ -93,14 +182,14 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
         n0 = round(Int, 1 + lwin * nadv * (nk - 1))
         window_data = S.data[n0:n0+lwin-1, :]
 
-        # ------------------------------------
+        # ---------------------------------
         # 1. Establece triadas POTENCIALES
-        # ------------------------------------
-        k_vt   = 1
+        # ---------------------------------
+        k_vt   = 1 # identificacion de triada
         @inbounds for t in eachindex(trios)
             trio = trios[t]
-            is_valid_trio = true
 
+            is_valid_trio = true
             for p in (trio.p1_idx, trio.p2_idx, trio.p3_idx)
                 if buf.cc[p] <= -1.5
                     i, j = pairs[p]
@@ -110,29 +199,39 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     signal_j = window_data[:, j]
 
                     # calcula delay usando FS-PHAT
-                    delay  = compute_delay!(buf.fsgcc_ws, signal_j, signal_i, psr_th)
+                    delay_ij, psr_ij, sigma_ij  = compute_delay!(buf.fsgcc_ws, signal_j, signal_i)
 
-                    if  abs(delay) > (dist*slowmax)
-                        # evita aliasing
-                        cc_val = 0
+                    if psr_ij < psr_th || abs(delay_ij) > (dist * slowmax)
+                        # primer filtro de validacion
+                        # el delay tiene que ser fisicamente valido y estadísticamente claro
+                        buf.cc[p] = 0.0
+                        is_valid_trio = false
+                        break
+                    end
+                    
+                    # calcula coeficiente correlacion en el tiempo
+                    lag = round(Int, delay_ij * S.fs)
+                    cc_ij = cc_overlap(signal_j, signal_i, lag, lwin)
+                    
+                    # segundo filtro de validacion
+                    if cc_ij >= min_cc
+                        # guarda parametros
+                        buf.dt[p]    = delay_ij
+                        buf.cc[p]    = cc_ij
+                        buf.sigma[p] = sigma_min + sigma_ij
                     else
-                        # calcula coeficiente correlacion en el tiempo
-                        lag = round(Int, delay * S.fs)
-                        cc_val = cc_overlap(signal_j, signal_i, lag, lwin)
-                        # si la correlacion fue mala, cc_val => 0.0
+                        buf.cc[p] = 0.0
+                        is_valid_trio = false
+                        break
                     end
 
-                    buf.dt[p] = delay
-                    buf.cc[p] = cc_val
-                end
-
-                if buf.cc[p] < min_cc
+                elseif buf.cc[p] == 0.0
                     is_valid_trio = false
                     break
                 end
             end
 
-            # 2. Validación de Cierre y Llenado de vt
+            # Validación de Cierre y Llenado de vt
             if is_valid_trio
                 dt1 = buf.dt[trio.p1_idx]
                 dt2 = buf.dt[trio.p2_idx]
@@ -144,31 +243,42 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
 
                 # limite fisico
                 max_tce = trio.dmax * slowmax
-                if abs(closure) <= max_tce * tol_tce
+                if abs(closure) <= max_tce #* tol_tce
                     # calcula la correlacion promedio
                     c1    = buf.cc[trio.p1_idx]
                     c2    = buf.cc[trio.p2_idx]
                     c3    = buf.cc[trio.p3_idx]
-                    cc123 = (c1 + c2 + c3) / 3.0
+                    ccavg = (c1 + c2 + c3) / 3.0
 
-                    # guarda valores en buffer
-                    # buf.trio_error[t] = closure
-                    # buf.trio_cc_avg[t] = cc123
-                    # println(t, "  CCavg: ", buf.trio_cc_avg[t], "  TCE: ", closure)
+                    # propagacion de errores
+                    s1 = buf.sigma[trio.p1_idx]
+                    s2 = buf.sigma[trio.p2_idx]
+                    s3 = buf.sigma[trio.p3_idx]
+                    s_closure = sqrt(s1^2 + s2^2 + s3^2)
 
-                    # guardamos para el misfitmap
-                    buf.vt.t[k_vt] = t
-                    buf.vt.x1[k_vt] = dx[trio.p1_idx]
-                    buf.vt.y1[k_vt] = dy[trio.p1_idx]
-                    buf.vt.x2[k_vt] = dx[trio.p2_idx]
-                    buf.vt.y2[k_vt] = dy[trio.p2_idx]
-                    buf.vt.x3[k_vt] = dx[trio.p3_idx]
-                    buf.vt.y3[k_vt] = dy[trio.p3_idx]
-                    buf.vt.dt1[k_vt] = dt1
-                    buf.vt.dt2[k_vt] = dt2
-                    buf.vt.dt3[k_vt] = dt3
-                    buf.vt.cc[k_vt]  = cc123
-                    buf.vt.tce2[k_vt] = closure^2
+                    # carga los parametros de las triadas
+                    buf.trios.t[k_vt] = t # id
+
+                    # geometrica de la triada
+                    buf.trios.x1[k_vt] = dx[trio.p1_idx]
+                    buf.trios.y1[k_vt] = dy[trio.p1_idx]
+                    buf.trios.x2[k_vt] = dx[trio.p2_idx]
+                    buf.trios.y2[k_vt] = dy[trio.p2_idx]
+                    buf.trios.x3[k_vt] = dx[trio.p3_idx]
+                    buf.trios.y3[k_vt] = dy[trio.p3_idx]
+
+                    # delays
+                    buf.trios.dt1[k_vt] = dt1
+                    buf.trios.dt2[k_vt] = dt2
+                    buf.trios.dt3[k_vt] = dt3
+
+                    # correlacion media
+                    buf.trios.cc_avg[k_vt]  = ccavg
+
+                    # tiempo de clausura e incertidumbre
+                    buf.trios.closure[k_vt] = closure
+                    buf.trios.sigma[k_vt]   = s_closure
+
                     k_vt += 1
                 end
             end
@@ -188,7 +298,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             # --------------------------------------
             # 1.2 FILTRA POR TRIADAS TEMP COHERENTES
             # --------------------------------------
-            nvalid1 = clean_triads_temp!(sx0, sy0, buf, trios, nvalid0, error_max)
+            nvalid1 = clean_triads_temp!(sx0, sy0, buf, trios, nvalid0, C_max)
 
             if nvalid1 >= 1
                 if nvalid0 != nvalid1
@@ -209,7 +319,7 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
 
                 if nvalid2 >= 1
                     save = true
-                    error_avg, cc_avg, D_mean = quality_metrics
+                    C_avg, cc_avg, D_avg, S_med = quality_metrics
 
                     # ----------------------------------
                     # 1.4 LENTITUD FROM GRID INTERPOLADO
@@ -247,15 +357,14 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
                     # 1.5 CALCULA CONSISTENCIA DE TRIADAS
                     # -----------------------------------
                     @inbounds for k in 1:nvalid2
-                        sx_local, sy_local = slowness_triad(buf.vt, k)
-                        dsx = sx_local - sxf
-                        dsy = sy_local - syf
-                        buf.vt.s_cons[k] = dsx*dsx + dsy*dsy
+                        dsx = buf.trios.sx[k] - sxf
+                        dsy = buf.trios.sy[k] - syf
+                        # agrega cuadrado de la distancia euclidiana
+                        buf.trios.delta_s2[k] = dsx*dsx + dsy*dsy
                     end
 
-                    s_cons_vals = [buf.vt.s_cons[k] for k in 1:nvalid2]
-                    sigma_s = median(s_cons_vals)
-                    slow_f  = sqrt(sxf*sxf + syf*syf)
+                    sigma_s = median([buf.trios.delta_s2[k] for k in 1:nvalid2])
+                    slow_f  = sxf*sxf + syf*syf
                     kappa   = exp(-sigma_s / slow_f)
                 end
             end
@@ -270,18 +379,17 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             dout["n_trios"][nk,2] = nvalid1
             dout["n_trios"][nk,3] = nvalid2
             
-            # trios info (filtro temporal)
-            @inbounds for k in 1:nvalid1
-                t_orig = buf.vt.t[k]
+            # guarda info de las triadas validas
+            @inbounds for k in 1:nvalid2
+                t_orig = buf.trios.t[k]
                 trio = trios[t_orig]
-                trios_stats = (trio.sta_triad, buf.vt.cc[k], sqrt(buf.vt.tce2[k]), buf.vt.spatial_res[k], buf.vt.s_cons[k])
+                trios_stats = (trio.sta_triad, buf.trios.cc_avg[k], buf.trios.closure[k], buf.trios.sigma[k], buf.trios.apert_eff[k], buf.trios.delta_s2[k])
                 push!(dout["trios"][nk], trios_stats)
             end
             
             dout["sx"][nk] = sxf
             dout["sy"][nk] = syf
             dout["misfit"][nk] = copy(buf.like_map)
-            dout["delta_s"][nk]  = delta_s
             
             dout["fpeak"][nk] = fpeak
             dout["beam_peak"][nk] = beampeak
@@ -291,18 +399,19 @@ function trias(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T; slowmax::T=
             # 2.1 METRICAS DE CALIDAD
             # ---------------------------
             dout["CC_trios"][nk] = cc_avg
+            dout["C_avg"][nk]    = C_avg
+            dout["D_avg"][nk]    = D_avg
             dout["kappa"][nk]    = kappa
-            dout["C_avg"][nk]    = error_avg
-            dout["D_avg"][nk]    = D_mean
+            dout["S_med"][nk]    = S_med
 
             # eta2
-            eta2 = kappa * sigmoid(-error_avg; x0=-1.) * sigmoid(D_mean; x0=0.5)
+            eta2 = kappa * sigmoid(-C_avg; x0=-1.) * sigmoid(D_avg; x0=0.5)
             dout["eta2"][nk] = eta2
 
             # ----------------------
             # 3 PSEUDO-VEROSIMILITUD
             # ----------------------
-            @. buf.like_map = exp(-sqrt(nvalid2 * eta2) * buf.like_map / sigma_min)
+            @. buf.like_map = exp(-sqrt(nvalid2 * eta2) * buf.like_map / S_med)
             
             # nivel de una desviacion estandar
             level = maximum(buf.like_map) / ℯ
@@ -364,7 +473,6 @@ function misfitmap!(like_map::AbstractMatrix{T}, buf::ThreadBuffers, nvtrios::In
     ny = length(s_grid_y)
 
     inv_2 = T(0.5)
-    sigma_val = buf.sigma
     min_weight = T(1e-6)
 
     fill!(like_map, zero(T))
@@ -386,22 +494,22 @@ function misfitmap!(like_map::AbstractMatrix{T}, buf::ThreadBuffers, nvtrios::In
             @simd ivdep for k in 1:nvtrios
                 
                 # delay teoricos
-                dt_t1 = sx * buf.vt.x1[k] + sy * buf.vt.y1[k]
-                dt_t2 = sx * buf.vt.x2[k] + sy * buf.vt.y2[k]
-                dt_t3 = sx * buf.vt.x3[k] + sy * buf.vt.y3[k]
+                dt_t1 = sx * buf.trios.x1[k] + sy * buf.trios.y1[k]
+                dt_t2 = sx * buf.trios.x2[k] + sy * buf.trios.y2[k]
+                dt_t3 = sx * buf.trios.x3[k] + sy * buf.trios.y3[k]
                     
                 # residuos norma L1
-                e_trio = abs(dt_t1 - buf.vt.dt1[k]) + 
-                         abs(dt_t2 - buf.vt.dt2[k]) + 
-                         abs(dt_t3 - buf.vt.dt3[k])
+                e_trio = abs(dt_t1 - buf.trios.dt1[k]) + 
+                         abs(dt_t2 - buf.trios.dt2[k]) + 
+                         abs(dt_t3 - buf.trios.dt3[k])
 
                 # tiempo maximo de la triada
                 tmax = inv_2 * (abs(dt_t1) + abs(dt_t2) + abs(dt_t3))
-                tmax += sigma_val
-                tmax *= tmax
+                tmax += buf.trios.sigma[k]
 
                 # funcion peso
-                w_val = buf.vt.cc[k] * exp(-buf.vt.tce2[k] / tmax)
+                clos  = buf.trios.closure[k]
+                w_val = buf.trios.cc_avg[k] * exp(-clos*clos/(tmax*tmax))
 
                 W_sum += w_val
                 R_sum += w_val * e_trio
@@ -413,11 +521,10 @@ function misfitmap!(like_map::AbstractMatrix{T}, buf::ThreadBuffers, nvtrios::In
 end
 
 
-function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, error_max::T) where {T<:Real}
+function clean_triads_temp!(best_sx::T, best_sy::T, buf::ThreadBuffers, trios, n_valid_trios::Int, C_max::T) where {T<:Real}
     
     k_vt_new = 1
     inv_2 = T(0.5)
-    sigma_val = buf.sigma
     stamask = buf.station_mask
 
     # Reseteamos la máscara de estaciones al inicio
@@ -425,23 +532,23 @@ function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, er
 
     @inbounds for k in 1:n_valid_trios
         # Extraemos las distancias de los lados de la tríada
-        x1, y1 = buf.vt.x1[k], buf.vt.y1[k]
-        x2, y2 = buf.vt.x2[k], buf.vt.y2[k]
-        x3, y3 = buf.vt.x3[k], buf.vt.y3[k]
+        x1, y1 = buf.trios.x1[k], buf.trios.y1[k]
+        x2, y2 = buf.trios.x2[k], buf.trios.y2[k]
+        x3, y3 = buf.trios.x3[k], buf.trios.y3[k]
         
         # Calculamos el tiempo de tránsito direccional para cada lado
         t1 = abs(x1 * best_sx + y1 * best_sy)
         t2 = abs(x2 * best_sx + y2 * best_sy)
         t3 = abs(x3 * best_sx + y3 * best_sy)
         tau_max = inv_2 * (t1 + t2 + t3)
-        
-        closure_error = sqrt(buf.vt.tce2[k])
-        time_error = closure_error / (tau_max + sigma_val)
+        tau_max += buf.trios.sigma[k]
+        clos = buf.trios.closure[k]
+        C_triad = clos*clos/(tau_max*tau_max)
         
         # Si pasa el filtro, la mantenemos en el buffer
-        if time_error <= error_max
-            t_orig = buf.vt.t[k]
-            trio = trios[t_orig]
+        if C_triad <= C_max
+            t_orig = buf.trios.t[k]
+            trio   = trios[t_orig]
 
             # activa las estaciones para el power beam
             for sta_idx in trio.sta_triad
@@ -450,20 +557,20 @@ function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, er
 
             # Desplazamos los datos en el buffer
             if k_vt_new != k
-                buf.vt.t[k_vt_new]  = t_orig
-                buf.vt.x1[k_vt_new] = x1
-                buf.vt.y1[k_vt_new] = y1
-                buf.vt.x2[k_vt_new] = x2
-                buf.vt.y2[k_vt_new] = y2
-                buf.vt.x3[k_vt_new] = x3
-                buf.vt.y3[k_vt_new] = y3
-                buf.vt.dt1[k_vt_new] = buf.vt.dt1[k]
-                buf.vt.dt2[k_vt_new] = buf.vt.dt2[k]
-                buf.vt.dt3[k_vt_new] = buf.vt.dt3[k]
-                buf.vt.cc[k_vt_new] = buf.vt.cc[k]
-                buf.vt.tce2[k_vt_new] = buf.vt.tce2[k]
+                buf.trios.t[k_vt_new]  = t_orig
+                buf.trios.x1[k_vt_new] = x1
+                buf.trios.y1[k_vt_new] = y1
+                buf.trios.x2[k_vt_new] = x2
+                buf.trios.y2[k_vt_new] = y2
+                buf.trios.x3[k_vt_new] = x3
+                buf.trios.y3[k_vt_new] = y3
+                buf.trios.dt1[k_vt_new] = buf.trios.dt1[k]
+                buf.trios.dt2[k_vt_new] = buf.trios.dt2[k]
+                buf.trios.dt3[k_vt_new] = buf.trios.dt3[k]
+                buf.trios.cc_avg[k_vt_new]  = buf.trios.cc_avg[k]
+                buf.trios.closure[k_vt_new] = buf.trios.closure[k]
+                buf.trios.sigma[k_vt_new]   = buf.trios.sigma[k]
             end
-
             k_vt_new += 1
         end
     end
@@ -472,52 +579,62 @@ function clean_triads_temp!(best_sx, best_sy, buf, trios, n_valid_trios::Int, er
 end
 
 
-function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f_peak::T) where {T<:Real}
+function clean_triads_space!(best_sx::T, best_sy::T, buf::ThreadBuffers, trios, n_valid_trios::Int, f_peak::T) where {T<:Real}
 
     k_vt_new = 1
     inv_2 = T(0.5)
-    sigma_val = buf.sigma
 
-    error_avg = T(0.0)
-    cc_avg    = T(0.0)
-    D_avg     = T(0.0)
+    D_triad_avg  = T(0.0) # aperture
+    C_triad_avg  = T(0.0) # closure
+    cc_triad_avg = T(0.0) # correlation
 
     @inbounds for k in 1:n_valid_trios
-        t_orig = buf.vt.t[k]
-        trio = trios[t_orig]
+        t_orig = buf.trios.t[k]
         
         # tau_max con best_s
-        t1 = abs(buf.vt.x1[k] * best_sx + buf.vt.y1[k] * best_sy)
-        t2 = abs(buf.vt.x2[k] * best_sx + buf.vt.y2[k] * best_sy)
-        t3 = abs(buf.vt.x3[k] * best_sx + buf.vt.y3[k] * best_sy)
-
+        t1 = abs(buf.trios.x1[k] * best_sx + buf.trios.y1[k] * best_sy)
+        t2 = abs(buf.trios.x2[k] * best_sx + buf.trios.y2[k] * best_sy)
+        t3 = abs(buf.trios.x3[k] * best_sx + buf.trios.y3[k] * best_sy)
         tau_max = inv_2 * (t1 + t2 + t3)
-        D_norm = tau_max * f_peak
+
+        # apertura efectiva de la kth-triada
+        apert_eff = tau_max * f_peak
 
         # FILTRO ESPACIAL
-        if D_norm > 0.5
-            D_avg += D_norm
+        nyquist_min = T(0.5)
+        if apert_eff > nyquist_min
+            D_triad_avg += apert_eff
 
-            closure_error = sqrt(buf.vt.tce2[k])
-            error_avg += closure_error/(tau_max + sigma_val)
-            cc_avg    += buf.vt.cc[k]
+            clos = buf.trios.closure[k]
+            sig  = buf.trios.sigma[k]
+            C_triad = clos*clos / (tau_max+sig)^2
+            C_triad_avg += C_triad
+
+            cc_triad_avg += buf.trios.cc_avg[k]
 
             # Desplazamos los datos en el buffer
             if k_vt_new != k
-                buf.vt.t[k_vt_new]  = t_orig
-                buf.vt.x1[k_vt_new] = buf.vt.x1[k]
-                buf.vt.y1[k_vt_new] = buf.vt.y1[k]
-                buf.vt.x2[k_vt_new] = buf.vt.x2[k]
-                buf.vt.y2[k_vt_new] = buf.vt.y2[k]
-                buf.vt.x3[k_vt_new] = buf.vt.x3[k]
-                buf.vt.y3[k_vt_new] = buf.vt.y3[k]
-                buf.vt.dt1[k_vt_new] = buf.vt.dt1[k]
-                buf.vt.dt2[k_vt_new] = buf.vt.dt2[k]
-                buf.vt.dt3[k_vt_new] = buf.vt.dt3[k]
-                buf.vt.cc[k_vt_new] = buf.vt.cc[k]
-                buf.vt.tce2[k_vt_new] = buf.vt.tce2[k]
-                buf.vt.spatial_res[k_vt_new] = D_norm
+                buf.trios.t[k_vt_new]  = t_orig
+                buf.trios.x1[k_vt_new] = buf.trios.x1[k]
+                buf.trios.y1[k_vt_new] = buf.trios.y1[k]
+                buf.trios.x2[k_vt_new] = buf.trios.x2[k]
+                buf.trios.y2[k_vt_new] = buf.trios.y2[k]
+                buf.trios.x3[k_vt_new] = buf.trios.x3[k]
+                buf.trios.y3[k_vt_new] = buf.trios.y3[k]
+                buf.trios.dt1[k_vt_new] = buf.trios.dt1[k]
+                buf.trios.dt2[k_vt_new] = buf.trios.dt2[k]
+                buf.trios.dt3[k_vt_new] = buf.trios.dt3[k]
+                buf.trios.cc_avg[k_vt_new]  = buf.trios.cc_avg[k]
+                buf.trios.closure[k_vt_new] = buf.trios.closure[k]
+                buf.trios.sigma[k_vt_new]   = buf.trios.sigma[k]
             end
+            
+            # agrega la apertura
+            buf.trios.apert_eff[k_vt_new] = apert_eff
+
+            # y calcula sx,sy de la triada (local)
+            slowness_triad!(k_vt_new, buf.trios)
+            
             k_vt_new += 1
         end
     end
@@ -525,237 +642,19 @@ function clean_triads_space!(best_sx, best_sy, buf, trios, n_valid_trios::Int, f
     n_valid_trios2 = k_vt_new-1
 
     if n_valid_trios2 >= 1
-        return n_valid_trios2, (error_avg/n_valid_trios2, cc_avg/n_valid_trios2, D_avg/n_valid_trios2)
+        C_triad_avg /= n_valid_trios2
+        D_triad_avg /= n_valid_trios2
+        cc_triad_avg /= n_valid_trios2
+
+        # incertidumbre típica del estimador de delay
+        S_triads = median(view(buf.trios.sigma, 1:n_valid_trios2))
+        return n_valid_trios2, (C_triad_avg, cc_triad_avg, D_triad_avg, S_triads)
+
     else
-        return n_valid_trios2, (T(NaN), T(NaN), T(NaN))
+        return n_valid_trios2, (T(NaN), T(NaN), T(NaN), T(NaN))
     end
 end
 
-
-function compute_psr(idx::Int, max_corr::AbstractFloat, ws::FSGCC_ws; exc_th::Real=0.1)
-    
-    second_peak = 1e-12
-
-    exclusion  = Int(round(exc_th * ws.fs * (ws.n_up / ws.n)))
-    excl_start = mod1(idx - exclusion, ws.n_up)
-    excl_end   = mod1(idx + exclusion, ws.n_up)
-    
-    if excl_start < excl_end
-        # CASO A: La exclusión es un bloque central [ ... XXX ... ]
-        
-        # Tramo Izquierdo
-        @inbounds for i in 1:(excl_start - 1)
-            val = abs(ws.C_up_time[i])
-            if val > second_peak; second_peak = val; end
-        end
-        
-        # Tramo Derecho
-        @inbounds for i in (excl_end + 1):ws.n_up
-            val = abs(ws.C_up_time[i])
-            if val > second_peak; second_peak = val; end
-        end
-        
-    else
-        # CASO B: La exclusión da la vuelta [ XX ... XX ]
-        @inbounds for i in (excl_end + 1):(excl_start - 1)
-            val = abs(ws.C_up_time[i])
-            if val > second_peak; second_peak = val; end
-        end
-    end
-
-    psr_db = 20 * log10(max_corr / second_peak)
-
-    return psr_db
-end
-
-
-function compute_delay!(ws::FSGCC_ws, s1_in::AbstractVector{T}, s2_in::AbstractVector{T}, psr_th::Real) where {T<:AbstractFloat}
-    
-    m1 = mean(s1_in)
-    m2 = mean(s2_in)
-
-    @inbounds @simd for i in 1:ws.n
-        ws.buf_s1[i] = (s1_in[i] - m1) * ws.window[i]
-        ws.buf_s2[i] = (s2_in[i] - m2) * ws.window[i]
-    end
-
-    # println("Energía e1: $e1, e2: $e2, norm: $norm_factor")
-
-    ws.buf_s1[ws.n+1:end] .= 0.0
-    ws.buf_s2[ws.n+1:end] .= 0.0
-    
-    # FFT (RFFT) usando mul!
-    mul!(ws.S1, ws.plan_fwd, ws.buf_s1)
-    mul!(ws.S2, ws.plan_fwd, ws.buf_s2)
-    
-    # Espectro Cruzado
-    @. ws.G12 = ws.S1 * conj(ws.S2)
-    
-    # Suavizado (Sub-bandas) - Cobos et al 2020
-    smooth_spectrum!(ws.G12_smooth, ws.G12, ws.B)
-    smooth_spectrum!(ws.G11_smooth, abs2.(ws.S1), ws.B)
-    smooth_spectrum!(ws.G22_smooth, abs2.(ws.S2), ws.B)
-    
-    # Peso Gamma-PHAT
-    norm_accum = zero(T)
-    @inbounds @simd for i in 1:ws.n_freq
-        denom = sqrt(ws.G11_smooth[i] * ws.G22_smooth[i]) + 1e-12
-        num   = abs(ws.G12_smooth[i])
-        gamma = num / denom # Esto es |G12| / sqrt(G11*G22)
-        
-        # Ponderación PHAT adaptativa
-        w = (gamma ^ ws.n_gamma) / (num + 1e-12)
-        
-        # Aplicar peso y máscara de una vez
-        ws.G12_smooth[i] = (ws.G12_smooth[i] * w) * ws.mask[i]
-        norm_accum += ws.mask[i]
-    end
-    
-    # Interpolación (Zero Padding correcto para RFFT)
-    # Limpiamos el buffer de upsampling
-    fill!(ws.C_up_freq, 0.0 + 0.0im)
-
-    # Copiamos la parte positiva del espectro
-    copyto!(ws.C_up_freq, 1, ws.G12_smooth, 1, ws.n_freq)
-    
-    # irfft -> salida temporal
-    mul!(ws.C_up_time, ws.plan_inv, ws.C_up_freq)
-    
-    # Buscamos el maximo
-    max_corr_raw, idx = findmax(ws.C_up_time)
-
-    # factor de normalizacion
-    # Multiplicamos por 2.0 por la simetría de la FFT (frecuencias negativas implícitas)
-    # Dividimos por ws.n_up porque la IFFT distribuye la energía en N puntos.
-    theoretical_max = (norm_accum * 2.0) / ws.n_up
-
-    if theoretical_max > 1e-6
-        cc_val = max_corr_raw / theoretical_max
-        cc_val = clamp(cc_val, -1.0, 1.0)
-    else
-        cc_val = 0.0
-    end
- 
-    # Peak-Sidelobe-Ratio (PSR)
-    # Rango de exclusión circular (100 ms)
-    psr_db = compute_psr(idx, cc_val, ws)
-
-    if psr_db < psr_th
-        delay  = 0.0
-    else
-        # calcula delay
-        lag = (idx <= ws.n_up ÷ 2) ? (idx - 1) : (idx - 1 - ws.n_up)
-        delay = lag / (ws.fs * (ws.n_up / ws.n_fft))
-    end
-
-    return delay
-end
-
-
-function init_fsgcc(n::Int, fs::Real, fmin::Real, fmax::Real, B::Int, n_gamma::Real, upsample::Int, df_taper::Real)
-
-    n_fft = nextpow(2, 2*n - 1)
-    n_up = n_fft * upsample
-    n_freq = (n_fft ÷ 2) + 1
-    n_freq_up = (n_up ÷ 2) + 1
-    
-    # ventana de hanning
-    w_time = 0.5 .* (1.0 .- cos.(2π .* (0:n-1) ./ (n-1)))
-    
-    # Pre-calcular mascara de frecuencia
-    freqs = rfftfreq(n_fft, fs) # solo positivas
-    mask = zeros(n_freq)
-    @inbounds for i in 1:n_freq
-        f = freqs[i]
-        if f >= fmin && f <= fmax
-            if f < fmin + df_taper
-                mask[i] = 0.5 * (1 - cos(pi * (f - fmin) / df_taper))
-            elseif f > fmax - df_taper
-                mask[i] = 0.5 * (1 - cos(pi * (fmax - f) / df_taper))
-            else
-                mask[i] = 1.0
-            end
-        end
-    end
-    
-    # Buffers con Zero-Padding implícito
-    b_s1 = zeros(Float64, n_fft)
-    b_s2 = zeros(Float64, n_fft)
-
-    # Buffers Frecuenciales
-    b_s1_f = zeros(ComplexF64, n_freq)
-    b_s2_f = zeros(ComplexF64, n_freq)
-    b_g12_f = zeros(ComplexF64, n_freq)
-    b_g12_s = zeros(ComplexF64, n_freq)
-    b_g1_s = zeros(Float64, n_freq)
-    b_g2_s = zeros(Float64, n_freq)
-
-    # Buffers Upsampling
-    b_f_up = zeros(ComplexF64, n_freq_up)
-    b_C_up = zeros(Float64, n_up)
-
-    # planes fftw
-    plan_fwd = plan_rfft(b_s1; flags=FFTW.MEASURE)
-    plan_inv = plan_irfft(b_f_up, n_up; flags=FFTW.MEASURE)
-
-    ws = FSGCC_ws(fs, n, n_fft, n_up, B, Float64(n_gamma), b_s1, b_s2, w_time, 
-        n_freq, b_s1_f, b_s2_f, b_g12_f, b_g12_s, b_g1_s, b_g2_s, mask, 
-        n_freq_up, b_f_up, b_C_up, 
-        plan_fwd, plan_inv)
-
-    return ws
-end
-
-
-function init_buffers(nsta, n_pairs, n_trios, nite, nite_f, nite_c, lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
-
-    T = Float64
-
-    # Inicializa FS-PHAT
-    ws = init_fsgcc(lwin, fs, fmin, fmax, B, n_gamma, upsample, df_taper)
-
-    # Buffers de correlación
-    dt = zeros(T, n_pairs)
-    cc = zeros(T, n_pairs)
-
-    # Buffers de tríos
-    trio_error  = zeros(T, n_trios)
-    trio_cc_avg = zeros(T, n_trios)
-    trio_w = zeros(T, n_trios)
-
-    # Buffers de likelihood
-    like_map = zeros(T, nite, nite)
-    finer_map   = zeros(T, nite_f, nite_f)
-    coarser_map = zeros(T, nite_c, nite_c)
-
-    # sigma teorico
-    sigma = one(T)/fs
-
-    # beam analysis
-    station_mask = falses(nsta)
-    station_lags = zeros(Int, nsta)
-    windows = haning_windows(lwin, T)
-    beam = zeros(T, lwin)
-    beam_window_fft = zeros(Complex{T}, lwin)
-
-    vt = ValidTrios(
-        Vector{Int}(undef, n_trios), # t
-        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x1, y1
-        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x2, y2
-        Vector{T}(undef, n_trios), Vector{T}(undef, n_trios), # x3, y3
-        Vector{T}(undef, n_trios), # dt1
-        Vector{T}(undef, n_trios), # dt2
-        Vector{T}(undef, n_trios), # dt3
-        Vector{T}(undef, n_trios), # cc
-        Vector{T}(undef, n_trios), # tce2
-        fill(T(NaN), n_trios), # slow_consistency
-        fill(T(NaN), n_trios) # spatial_res
-    )
-
-    buff = ThreadBuffers(ws, dt, cc, trio_error, trio_cc_avg, trio_w, vt, like_map, finer_map, coarser_map, sigma, station_mask, station_lags, windows, beam, beam_window_fft)
-    
-    return buff
-end
 
 
 function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::AbstractVector{T}, lwin::Int, fsem::Real, sx::Real, sy::Real, buf::ThreadBuffers) where {T<:AbstractFloat}
@@ -849,7 +748,8 @@ function beam_analysis(data::AbstractArray{T}, xSta::AbstractVector{T}, ySta::Ab
 end
 
 
-function slowness_triad(vt::ValidTrios, k::Int)
+function slowness_triad!(k::Int, vt::TriadParams)
+    
     # Diferencias de coordenadas
     dx1 = vt.x1[k]; dy1 = vt.y1[k]
     dx2 = vt.x2[k]; dy2 = vt.y2[k]
@@ -870,9 +770,9 @@ function slowness_triad(vt::ValidTrios, k::Int)
     det = mtm_11 * mtm_22 - mtm_12 * mtm_12
     
     inv_det = 1.0 / det
-    sx = inv_det * ( mtm_22 * mtd_1 - mtm_12 * mtd_2 )
-    sy = inv_det * (-mtm_12 * mtd_1 + mtm_11 * mtd_2 )
-    
-    return sx, sy
+    vt.sx[k] = inv_det * ( mtm_22 * mtd_1 - mtm_12 * mtd_2 )
+    vt.sy[k] = inv_det * (-mtm_12 * mtd_1 + mtm_11 * mtd_2 )
+
+    return
 end
 
