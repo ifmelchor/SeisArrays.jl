@@ -9,6 +9,7 @@ module SeisArrays
     using Contour
     using Interpolations
 
+    export uncertainty_contour
     export SeisArray2D
     export zlcc
     export trias
