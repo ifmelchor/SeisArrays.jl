@@ -4,8 +4,6 @@
 abstract type AbstractSeisArray{T} end
 
 
-
-
 struct SeisArray2D{T<:Real} <: AbstractSeisArray{T}
     xcoord::Vector{T} # coordenadas UTM (eastern) en km
     ycoord::Vector{T} # coordenadas UTM (northing) en km
@@ -32,35 +30,19 @@ struct SeisArray2D{T<:Real} <: AbstractSeisArray{T}
 end
 
 
-
-struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
-    data::Matrix{T}
-    dx::Vector{T}
-    dy::Vector{T}
-    citer::Vector{Tuple{Int, Int}}
-    
-    lwin::Int
-    nsta::Int
-    slomax2::T
-
-    # Grillas
-    s_grid::R
-    s_grid_c::R
-    s_grid_f::R
-
-    # tamaños
-    nite :: Int
-    nite_c :: Int
-    nite_f :: Int
-    
-    # Mapas
-    ccmap::Matrix{T}
-    ccmap_c::Matrix{T}
-    ccmap_f::Matrix{T}
-    
-    # Buffers de trabajo
-    benergy::Vector{T}
-    beam::Vector{T}
-    taper::Vector{Float64}
-    fft_buf::Vector{ComplexF64}
+struct TriangleDef{T<:AbstractFloat}
+    i::Int          # i < j < k por construcción
+    j::Int
+    k::Int
+    # métricas geométricas precalculadas
+    dmin::T
+    dmax::T
+    dx_ij::T
+    dx_jk::T
+    dx_ki::T
+    dy_ij::T
+    dy_jk::T
+    dy_ki::T
 end
+
+

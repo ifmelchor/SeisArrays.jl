@@ -9,16 +9,28 @@ module SeisArrays
     using Contour
     using Interpolations
 
-    export uncertainty_contour
-    export SeisArray2D
-    export zlcc
-    export trias
+    export SeisArray2D, TriangleDef
+
+    # GCC (Generalized Cross-Correlation)
+    export init_wsgcc, gcc_delay, delay_matrix_gcc
     
+    # Metodos de analisis de array
+    export zlcc
+    export init_triads, trias
+    
+    # Archivos Base
     include("types.jl")
-    include("utils.jl")
+    include("topology.jl")
+    include("slowness_grids.jl")
+
+    # Utilidades
     include("signals.jl")
+    include("filter.jl")
+    # include("cf.jl") 
+
+    # Motores de Correlación y Delays
     include("gcc.jl")
-    include("contours.jl")
+    # include("lcc.jl")
 
     # Zero Lag Cross Correlation
     include("zlcc.jl")

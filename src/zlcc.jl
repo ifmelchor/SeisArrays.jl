@@ -4,6 +4,39 @@
 # GNU GPL v2 licenced to I. Melchor and J. Almendros 08/2022
 # Zero LAG CrossCorrelacion
 
+struct ZLCC_WS_CPU{T<:AbstractFloat, R<:AbstractRange{T}}
+    data::Matrix{T}
+    dx::Vector{T}
+    dy::Vector{T}
+    citer::Vector{Tuple{Int, Int}}
+    
+    lwin::Int
+    nsta::Int
+    slomax2::T
+
+    # Grillas
+    s_grid::R
+    s_grid_c::R
+    s_grid_f::R
+
+    # tamaños
+    nite :: Int
+    nite_c :: Int
+    nite_f :: Int
+    
+    # Mapas
+    ccmap::Matrix{T}
+    ccmap_c::Matrix{T}
+    ccmap_f::Matrix{T}
+    
+    # Buffers de trabajo
+    benergy::Vector{T}
+    beam::Vector{T}
+    taper::Vector{Float64}
+    fft_buf::Vector{ComplexF64}
+end
+
+
 function zlcc(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Real, args...; kwargs...)
     
     SA = SeisArray2D(x, y, data, fs)
@@ -12,7 +45,24 @@ function zlcc(data::AbstractArray, x::AbstractVector, y::AbstractVector, fs::Rea
 end
 
 
-function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slowmax::Real, toff::Real; slowint_c::Real=0.1, slowint_f::Real=0.01, ccerr::Real=0.95, maac_th::Real=0.3, slowfw::Real=0.5, ratio_max::Real=0.05, return_cmap::Bool=true, stack::Bool=false, baz_th::Real=30.0, baz_lim::Union{Vector{<:Real}, Nothing}=nothing)
+mutable struct ZLCCOutput{T<:AbstractFloat}
+    time_s    :: Vector{T}
+    maac      :: Vector{T}
+    sx        :: Vector{T}
+    sy        :: Vector{T}
+    slow      :: Matrix{T}   # (nwin, 3)
+    baz       :: Matrix{T}   # (nwin, 3)
+    fpeak     :: Vector{T}
+    beam      :: Vector{T}
+    beam_max  :: Vector{T}
+    s_ratio   :: Vector{T}
+    slow_width:: Vector{T}
+    baz_width :: Vector{T}
+    smap      :: Vector{Union{Matrix{T}, Nothing}}
+end
+
+
+function zlcc(S::SeisArray2D, lwin::Int, nadv::T, fmin::T, fmax::T, slowmax::T, toff::T, slowint_c::T, slowint_f::T, ccerr::T, maac_th::T, slowfw::T, return_cmap::Bool) where {T<:AbstractFloat}
     
     # filtramos los datos
     filter!(S, fmin, fmax)
@@ -24,34 +74,32 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
     nwin = floor(Int, (npts - 2 * toff_samp - lwin) / step) + 1
 
     # inica buffers pre-allocados
+    # if slowint_f == 0 (solo mapa grueso)
     n_threads = Threads.nthreads()
     thread_buffers = [
         init_zlcc_workspace(S, lwin, slowmax, slowint_c, slowfw, slowint_f)
     for _ in 1:n_threads
     ]
 
-    # diccionario de guardado
-    dout = Dict{String, Any}()
-    dout["time_s"] = fill(NaN, nwin)
-    dout["maac"]   = fill(NaN, nwin)
-    dout["sx"]     = fill(NaN, nwin)
-    dout["sy"]     = fill(NaN, nwin)
-    dout["beam"]   = fill(NaN, nwin)
-    dout["beam_max"] = fill(NaN, nwin)
-    dout["fpeak"]   = fill(NaN, nwin)
-    dout["baz"]    = fill(NaN, (nwin,3))
-    dout["slow"]   = fill(NaN, (nwin,3))
-    dout["s_ratio"]  = fill(NaN, nwin)
-    dout["s_circ"]   = fill(NaN, nwin)
-    dout["s_radii"]  = fill(NaN, nwin)
-    dout["baz_width"]  = fill(NaN, nwin)
-    dout["slow_width"] = fill(NaN, nwin)
+    # Crea el guardado
+    nan1 = fill(T(NaN), nwin)       # vector 1D de NaN
+    nan2 = fill(T(NaN), nwin, 3)    # matriz (nwin,3) de NaN
+    out = ZLCCOutput{T}(
+        copy(nan1),   # time_s
+        copy(nan1),   # maac
+        copy(nan1),   # sx
+        copy(nan1),   # sy
+        copy(nan2),   # slow
+        copy(nan2),   # baz
+        copy(nan1),   # fpeak
+        copy(nan1),   # beam
+        copy(nan1),   # beam_max
+        copy(nan1),   # s_ratio
+        copy(nan1),   # slow_width
+        copy(nan1),   # baz_width
+        fill!(Vector{Union{Matrix{T}, Nothing}}(undef, nwin), nothing)
+        )
 
-    if return_cmap || stack
-        return_cmap = true
-        dout["slowmap"] = Vector{Union{Matrix{Float32}, Nothing}}(undef, nwin)
-    end
-    
     @inbounds @views Threads.@threads for nk in 1:nwin
         n0 = 1 + toff_samp + step * (nk - 1)
 
@@ -81,74 +129,69 @@ function zlcc(S::SeisArray2D, lwin::Int, nadv::Real, fmin::Real, fmax::Real, slo
             best_sx = buf.s_grid[ii]
             best_sy = buf.s_grid[jj]
 
-            dout["time_s"][nk] = (n0 - 1 - toff_samp) / S.fs
-            dout["maac"][nk] = maac
-            dout["sx"][nk] = best_sx
-            dout["sy"][nk] = best_sy
-
-            if return_cmap
-                dout["slowmap"][nk]  = copy(buf.ccmap)
-            end
-
             # calcula metricas del beam
-            beam, bpeak, fpeak = _power_beam(buf, n0, S.fs, best_sx, best_sy)
-            dout["beam"][nk]     = beam
-            dout["beam_max"][nk] = bpeak
-            dout["fpeak"][nk]    = fpeak
+            beam = _power_beam(buf, n0, S.fs, best_sx, best_sy)
 
             # calcula la incertidumbre
             level = maac*ccerr
             uncert = uncertainty_contour(buf.s_grid, buf.s_grid, buf.ccmap, level)
-            dout["s_ratio"][nk] = uncert[1]
-            dout["s_circ"][nk]  = uncert[2] # circularidad del contorno de íncertidumbre
-            dout["s_radii"][nk] = uncert[3]
 
-            # SLOW min, SLOW central, SLOW max
-            slobnd = uncert[4]
-            dout["slow"][nk,1] = slobnd[1]
-            dout["slow"][nk,2] = slobnd[2]
-            dout["slow"][nk,3] = slobnd[3]
-            dout["slow_width"][nk] = slobnd[4]
-
-            # BAZ min, BAZ central, BAZ max
-            bazbnd = uncert[5]
-            dout["baz"][nk,1] = bazbnd[1]
-            dout["baz"][nk,2] = bazbnd[2]
-            dout["baz"][nk,3] = bazbnd[3]
-            dout["baz_width"][nk] = bazbnd[4]
+            # guarda datos
+            t0 = T(n0 - 1 - toff_samp) / T(S.fs)
+            _save_window!(out, nk, t0, maac, best_sx, best_sy, beam, uncert, buf.ccmap, return_cmap)
         end
     end
 
-    mask = findall(x -> !isnan(x), dout["maac"])
+    _mask_output(out)
+end
 
-    if isempty(mask)
-        thread_buffers = nothing
-        GC.gc()
-        return nothing
+
+function _save_window!(out::ZLCCOutput{T}, nk::Int, t0::T, maac::T, sx::T, sy::T, beam, uncert, smap, return_cmap::Bool) where {T<:AbstractFloat}
+
+    out.time_s[nk]     = t0
+    out.maac[nk]       = maac
+    out.sx[nk]         = sx
+    out.sy[nk]         = sy
+    out.fpeak[nk]      = beam.fpeak
+    out.beam[nk]       = beam.beam_rms
+    out.beam_max[nk]   = beam.beam_max
+
+    if !isnothing(uncert)
+        out.slow[nk, 1] = uncert.slowmin
+        out.slow[nk, 2] = uncert.slow
+        out.slow[nk, 3] = uncert.slowmax
+        out.baz[nk, 1]  = uncert.bazmin
+        out.baz[nk, 2]  = uncert.baz
+        out.baz[nk, 3]  = uncert.bazmax
+        out.slow_width[nk] = uncert.sloww
+        out.baz_width[nk]  = uncert.bazw
+        out.s_ratio[nk]    = uncert.ratio
     end
 
-    # if stack
-    #     stack_dout = zlcc_stack(dout, mask, ws, maac_th, baz_th, baz_lim, ccerr)
-    # end
-    
-    final_dout = Dict{String, Any}()
-    for key in keys(dout)
-        val = dout[key]
-        if ndims(val) == 1
-            final_dout[key] = val[mask]
-        else
-            final_dout[key] = val[mask, :, :]
-        end
+    if return_cmap
+        out.smap[nk]  = copy(smap)
     end
+end
 
-    thread_buffers = nothing
-    GC.gc()
 
-    # if stack
-    #     return final_dout, stack_dout
-    # else
-    return final_dout
-    # end
+function _mask_output(out::ZLCCOutput{T}) where {T}
+    mask = findall(!isnan, out.time_s)
+    isempty(mask) && return nothing
+    return ZLCCOutput{T}(
+        out.time_s[mask],
+        out.maac[mask],
+        out.sx[mask],
+        out.sy[mask],
+        out.slow[mask, :],
+        out.baz[mask, :],
+        out.fpeak[mask],
+        out.beam[mask],
+        out.beam_max[mask],
+        out.s_ratio[mask],
+        out.slow_width[mask],
+        out.baz_width[mask],
+        out.smap[mask]
+    )
 end
 
 
@@ -202,7 +245,6 @@ function init_zlcc_workspace(S::SeisArray2D, lwin, slowmax, slowint_c, slowfw, s
 
     return ws
 end
-
 
 
 function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int)
@@ -266,7 +308,6 @@ function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int)
         end
     end
 end
-
 
 
 function _compute_ccmap!(ws::ZLCC_WS_CPU, n0::Int, sx0, sy0)
@@ -357,22 +398,22 @@ function _power_beam(ws::ZLCC_WS_CPU, n0::Int, fs, sx0, sy0)
         end
     end
 
-    # Mean Square
+    # Root mean Square
     sum_sq = 0.0
     @inbounds @simd for k in 1:lwin
         val = beam[k]
         sum_sq = muladd(val, val, sum_sq)
     end
-    rms_val = sqrt(sum_sq / lwin) / nsta
+    beam_rms = sqrt(sum_sq / lwin) / nsta
 
     # Peak value and prepare fft_buf
-    max_sq = 0.0
+    max_abs = 0.0
     @inbounds for i in 1:lwin
         val = beam[i]
-        max_sq = max(max_sq, abs(val))
+        max_abs = max(max_abs, abs(val))
         fft_buf[i] = val * taper[i]
     end
-    peak_val = max_sq / nsta
+    beam_max = max_abs / nsta
 
     # perform fft
     fft!(fft_buf)
@@ -392,10 +433,10 @@ function _power_beam(ws::ZLCC_WS_CPU, n0::Int, fs, sx0, sy0)
 
     fpeak = (idx_max - 1) * fs / length(fft_buf)
 
-    return rms_val, peak_val, fpeak
+    return (; beam_rms, beam_max, fpeak)
 end
 
-
+# revisar el stack!
 function zlcc_stack(dout::Dict, mask::Vector{<:Integer}, ws::ZLCC_WS_CPU, maac_th::Real, baz_th::Real, baz_lim::Union{Vector{<:Real}, Nothing}=nothing, ccerr::Real=0.95, ratio_max::Real=0.05)
 
     raw_maac = dout["maac"][mask,1]
